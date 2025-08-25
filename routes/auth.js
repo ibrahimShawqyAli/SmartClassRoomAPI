@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require("bcryptjs");
 const { query } = require("../DB/dbConnection");
 const jwt = require("jsonwebtoken");
+const auth = require("../middleware/auth");
 // POST /auth/register
 router.post("/register", async (req, res) => {
   try {
@@ -54,87 +55,7 @@ router.post("/register", async (req, res) => {
       .json({ status: false, error: "Registration failed" });
   }
 });
-// ! login
 
-// /* POST /auth/login */
-// router.post("/login", async (req, res) => {
-//   try {
-//     const { email, password, udid } = req.body;
-
-//     if (!email || !password || !udid) {
-//       return res
-//         .status(400)
-//         .json({ status: false, error: "Missing email, password, or udid" });
-//     }
-
-//     // 1) Find user
-//     const userSql = "SELECT * FROM dbo.users WHERE email=@p0";
-//     const result = await query(userSql, [email]);
-
-//     if (result.recordset.length === 0) {
-//       return res
-//         .status(401)
-//         .json({ status: false, error: "Invalid credentials" });
-//     }
-
-//     const user = result.recordset[0];
-
-//     // 2) Verify password
-//     const match = await bcrypt.compare(password, user.password_hash);
-//     if (!match) {
-//       return res
-//         .status(401)
-//         .json({ status: false, error: "Invalid credentials" });
-//     }
-
-//     // 3) Check device binding
-//     // 3) Check device binding
-//     const deviceSql = "SELECT * FROM dbo.devices WHERE user_id=@p0";
-//     const devRes = await query(deviceSql, [user.id]);
-
-//     if (devRes.recordset.length === 0) {
-//       // first login → bind this UDID to this user
-//       await query("INSERT INTO dbo.devices (user_id, udid) VALUES (@p0,@p1)", [
-//         user.id,
-//         udid,
-//       ]);
-//     } else {
-//       // device already exists for this user → must match
-//       if (devRes.recordset[0].udid !== udid) {
-//         return res
-//           .status(403)
-//           .json({ status: false, error: "Device mismatch for this user" });
-//       }
-//     }
-
-//     // 4) Generate JWT (valid for 1 year)
-//     const token = jwt.sign(
-//       { id: user.id, role: user.role },
-//       process.env.JWT_SECRET || "supersecret",
-//       { expiresIn: "365d" }
-//     );
-
-//     // 5) Return success
-//     return res.json({
-//       status: true,
-//       token,
-//       user: {
-//         id: user.id,
-//         name: user.name,
-//         email: user.email,
-//         department: user.department,
-//         level: user.level,
-//         section: user.section,
-//         group_name: user.group_name,
-//         role: user.role,
-//       },
-//     });
-//   } catch (err) {
-//     console.error("Login error:", err);
-//     return res.status(500).json({ status: false, error: "Login failed" });
-//   }
-// });
-/* POST /auth/login */
 router.post("/login", async (req, res) => {
   try {
     const { email, password, udid } = req.body;
@@ -315,5 +236,61 @@ router.post("/password/reset", async (req, res) => {
       .json({ status: false, error: "Failed to reset password" });
   }
 });
+/**
+ * POST /auth/change-password
+ * Header: Authorization: Bearer <JWT>
+ * Body: { old_password, new_password }
+ */
+router.post("/change-password", auth, async (req, res) => {
+  try {
+    const { old_password, new_password } = req.body || {};
 
+    // basic checks
+    if (!old_password || !new_password) {
+      return res.status(400).json({
+        status: false,
+        error: "old_password and new_password are required",
+      });
+    }
+    if (new_password.length < 6) {
+      return res.status(400).json({
+        status: false,
+        error: "new_password must be at least 6 characters",
+      });
+    }
+
+    // 1) get current hash for this user (from token)
+    const u = await query(
+      "SELECT id, password_hash FROM dbo.users WHERE id=@p0",
+      [req.user.id]
+    );
+    if (u.recordset.length === 0) {
+      return res.status(404).json({ status: false, error: "User not found" });
+    }
+
+    // 2) verify old password
+    const ok = await bcrypt.compare(old_password, u.recordset[0].password_hash);
+    if (!ok) {
+      return res
+        .status(401)
+        .json({ status: false, error: "Old password is incorrect" });
+    }
+
+    // 3) hash new password & update
+    const newHash = await bcrypt.hash(new_password, 10);
+    await query(
+      `UPDATE dbo.users
+         SET password_hash=@p1, updated_at = SYSUTCDATETIME()
+       WHERE id=@p0`,
+      [req.user.id, newHash]
+    );
+
+    return res.json({ status: true, message: "Password updated successfully" });
+  } catch (err) {
+    console.error("change-password error:", err);
+    return res
+      .status(500)
+      .json({ status: false, error: "Failed to change password" });
+  }
+});
 module.exports = router;

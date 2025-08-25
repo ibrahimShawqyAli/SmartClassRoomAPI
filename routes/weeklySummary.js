@@ -105,7 +105,7 @@ router.get("/", auth, async (req, res) => {
       const held = heldMap.get(lecId) || 0;
       const attend = startedMap.get(lecId) || 0;
       const absence = Math.max(held - attend, 0);
-      return { lecture_id: lecId, attend, absence };
+      return { lecture_id: lecId, attend, absence, lecture_name: row.name };
     });
 
     return res.json({ status: true, summary });

@@ -25,6 +25,7 @@ app.use("/attendance", require("./routes/attendance"));
 app.use("/reports", require("./routes/reports"));
 app.use("/weekly-reports", require("./routes/weeklySummary"));
 app.use("/files", require("./routes/files"));
+app.use("/lecture-sessions", require("./routes/getLectureSessions"));
 
 // 404 fallback
 app.use((req, res) =>
