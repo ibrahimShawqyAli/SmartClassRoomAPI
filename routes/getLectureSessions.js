@@ -19,7 +19,7 @@ const auth = require("../middleware/auth");
  * Access: user must be assigned to that lecture (student/teacher) or be admin
  */
 // routes/lectureSessions.js (replace your /list handler with this)
-router.get("/list", auth, async (req, res) => {
+router.post("/list", auth, async (req, res) => {
   try {
     const { lecture_id } = req.body || {};
     if (!lecture_id) {
