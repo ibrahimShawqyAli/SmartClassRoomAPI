@@ -1,6 +1,7 @@
 // index.js
 const express = require("express");
 const http = require("http");
+const path = require("path");
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const { query } = require("./DB/dbConnection");
@@ -13,43 +14,46 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(express.json());
 app.set("io", io);
 
-// health check
+// static files for uploaded content
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+
+// health
 app.get("/", (req, res) => res.json({ ok: true }));
 
-// mount routes
+// routes
+app.use("/", require("./routes/lectureDetails"));
 app.use("/auth", require("./routes/auth"));
 app.use("/lectures", require("./routes/lectures"));
 app.use("/lecture-assignments", require("./routes/lectureAssignments"));
 app.use("/lecture-sessions", require("./routes/lectureSessions"));
+// REMOVE the duplicate mount or give it a different base:
+// app.use("/lecture-sessions", require("./routes/getLectureSessions"));
 app.use("/attendance", require("./routes/attendance"));
 app.use("/reports", require("./routes/reports"));
 app.use("/weekly-reports", require("./routes/weeklySummary"));
 app.use("/files", require("./routes/files"));
-app.use("/lecture-sessions", require("./routes/getLectureSessions"));
 app.use("/admin", require("./routes/adminOps"));
 
-// 404 fallback
+// 404
 app.use((req, res) =>
   res.status(404).json({ status: false, error: "Not found", path: req.path })
 );
 
-/* ------------------ Socket.IO (only assigned users) ------------------ */
-
-// authenticate socket using JWT from handshake auth
+// Socket.IO auth
 io.use((socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error("no token"));
     const user = jwt.verify(token, process.env.JWT_SECRET || "supersecret");
     socket.user = { id: user.id, role: user.role };
-    socket.join(`user:${user.id}`); // optional per-user room
+    socket.join(`user:${user.id}`);
     next();
-  } catch {
+  } catch (err) {
     next(new Error("bad token"));
   }
 });
 
-// allow joining lecture rooms only if the user is assigned to that lecture
+// join/leave lecture rooms
 io.on("connection", (socket) => {
   socket.on("join-lecture", async (lectureId) => {
     try {
@@ -57,22 +61,19 @@ io.on("connection", (socket) => {
         `SELECT role FROM dbo.lecture_assignments WHERE lecture_id=@p0 AND user_id=@p1`,
         [lectureId, socket.user.id]
       );
-
       if (!r.recordset.length && socket.user.role !== "admin") {
         return socket.emit("join-denied", {
           lecture_id: lectureId,
           reason: "not assigned",
         });
       }
-
       const role = r.recordset[0]?.role || socket.user.role;
-
       if (role === "student") socket.join(`lec:${lectureId}:students`);
       if (role === "teacher") socket.join(`lec:${lectureId}:teachers`);
-      socket.join(`lec:${lectureId}:all`); // optional combined
-
+      socket.join(`lec:${lectureId}:all`);
       socket.emit("join-ok", { lecture_id: lectureId, role });
-    } catch {
+    } catch (e) {
+      console.error("join-lecture error:", e);
       socket.emit("join-denied", {
         lecture_id: lectureId,
         reason: "server error",
