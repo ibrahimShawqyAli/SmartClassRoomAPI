@@ -19,20 +19,16 @@ router.post("/check", auth, async (req, res) => {
     const { lecture_id, action, modulation_string, udid, now_ts } = req.body;
 
     if (!lecture_id || !action || !modulation_string) {
-      return res
-        .status(400)
-        .json({
-          status: false,
-          error: "lecture_id, action, modulation_string required",
-        });
+      return res.status(400).json({
+        status: false,
+        error: "lecture_id, action, modulation_string required",
+      });
     }
     if (!["checkin", "checkout"].includes(action)) {
-      return res
-        .status(400)
-        .json({
-          status: false,
-          error: "action must be 'checkin' or 'checkout'",
-        });
+      return res.status(400).json({
+        status: false,
+        error: "action must be 'checkin' or 'checkout'",
+      });
     }
 
     // 1) lecture + modulation
@@ -66,19 +62,53 @@ router.post("/check", auth, async (req, res) => {
         .json({ status: false, error: "User not assigned to this lecture" });
     }
 
-    // 3) session must be started today
-    const planned_date = (now_ts ? new Date(now_ts) : new Date())
+    // 3) choose the correct session for today
+    const today = (now_ts ? new Date(now_ts) : new Date())
       .toISOString()
       .slice(0, 10);
-    const sess = await query(
-      "SELECT TOP 1 id, status FROM dbo.lecture_sessions WHERE lecture_id=@p0 AND planned_date=@p1",
-      [lecture_id, planned_date]
-    );
-    if (!sess.recordset.length || sess.recordset[0].status !== "started") {
-      return res
-        .status(400)
-        .json({ status: false, error: "Lecture not started by teacher yet" });
+
+    // For check-in: require a STARTED session; pick the latest one
+    let sessSql = `
+  SELECT TOP 1 id, status
+  FROM dbo.lecture_sessions
+  WHERE lecture_id=@p0 AND planned_date=@p1 AND status='started'
+  ORDER BY
+    ISNULL(started_at,
+           DATEADD(SECOND, DATEDIFF(SECOND, 0, planned_start_time), CAST(planned_date AS DATETIME2))
+    ) DESC,
+    id DESC
+`;
+    let sess = await query(sessSql, [lecture_id, today]);
+
+    // For checkout: prefer a STARTED session; if none, fall back to most recent ENDED today
+    if (action === "checkout" && !sess.recordset.length) {
+      sessSql = `
+    SELECT TOP 1 id, status
+    FROM dbo.lecture_sessions
+    WHERE lecture_id=@p0 AND planned_date=@p1 AND status IN ('started','ended')
+    ORDER BY
+      CASE WHEN status='started' THEN 1 ELSE 2 END, -- started first
+      ISNULL(started_at,
+             DATEADD(SECOND, DATEDIFF(SECOND, 0, planned_start_time), CAST(planned_date AS DATETIME2))
+      ) DESC,
+      ISNULL(ended_at,
+             DATEADD(SECOND, DATEDIFF(SECOND, 0, planned_end_time), CAST(planned_date AS DATETIME2))
+      ) DESC,
+      id DESC
+  `;
+      sess = await query(sessSql, [lecture_id, today]);
     }
+
+    if (!sess.recordset.length) {
+      return res.status(400).json({
+        status: false,
+        error:
+          action === "checkin"
+            ? "No started session available for check-in"
+            : "No session available for checkout",
+      });
+    }
+
     const session_id = sess.recordset[0].id;
 
     // 4) write attendance (first in, last out)
