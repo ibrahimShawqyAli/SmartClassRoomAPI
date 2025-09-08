@@ -34,6 +34,7 @@ router.get("/lecture-details", auth, async (req, res) => {
       SELECT
         l.id,
         l.name,
+        l.place,
         CONVERT(VARCHAR(8), l.start_time, 108) AS start_time,
         CONVERT(VARCHAR(8), l.end_time,   108) AS end_time
         -- If you DON'T have end_time column, use this instead:
@@ -95,6 +96,7 @@ router.get("/lecture-details", auth, async (req, res) => {
       status: true,
       lecture_id: L.id,
       lecture_name: L.name,
+      lecture_place: L.place,
       time: {
         start_time: L.start_time, // "HH:mm:ss"
         end_time: L.end_time, // "HH:mm:ss"
