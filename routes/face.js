@@ -183,12 +183,35 @@ router.post("/verify-user", upload.single("file"), async (req, res) => {
 
     const py = await fr.post("/verify", form, { headers: form.getHeaders() });
     const data = py.data;
+    // after: const data = py.data;
+
+    const SIMILARITY_THRESHOLD = 75; // tweak to your needs
+    const COSINE_THRESHOLD = 0.65; // tweak to your needs
+
+    // Prefer explicit flags if present; otherwise derive from thresholds
+    const derivedMatch =
+      (typeof data.match === "boolean" ? data.match : null) ??
+      (typeof data.same_person === "boolean" ? data.same_person : null) ??
+      (typeof data.similarity_percent === "number"
+        ? data.similarity_percent >= SIMILARITY_THRESHOLD
+        : null) ??
+      (typeof data.raw_cosine_similarity === "number"
+        ? data.raw_cosine_similarity >= COSINE_THRESHOLD
+        : false);
+
+    // Choose a single "score" to expose (optional)
+    const score =
+      (typeof data.similarity_percent === "number" &&
+        data.similarity_percent) ??
+      (typeof data.raw_cosine_similarity === "number" &&
+        data.raw_cosine_similarity) ??
+      null;
 
     return res.json({
       status: true,
       user_id,
-      match: Boolean(data.match),
-      score: data.score,
+      match: derivedMatch,
+      score, // could be percent or cosine (document which one you use)
       raw: data,
     });
   } catch (e) {
