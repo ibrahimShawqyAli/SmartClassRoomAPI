@@ -1,14 +1,14 @@
-// routes/face.js
-import express from "express";
-import fs from "fs";
-import path from "path";
-import crypto from "crypto";
-import multer from "multer";
-import mime from "mime-types";
-import axios from "axios";
-import FormData from "form-data";
-import http from "http";
-import { query } from "../DB/dbConnection.js"; // adjust path if CJS
+// routes/face.js  (CommonJS)
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const multer = require("multer");
+const mime = require("mime-types");
+const axios = require("axios");
+const FormData = require("form-data");
+const http = require("http");
+const { query } = require("../DB/dbConnection"); // CJS import
 
 const router = express.Router();
 
@@ -29,7 +29,6 @@ const fr = axios.create({
 
 /* ---------- Helpers ---------- */
 function bufferFromBase64(dataUriOrRaw) {
-  // supports "data:image/jpeg;base64,...." OR raw base64 string
   const commaIdx = dataUriOrRaw.indexOf(",");
   const base64 =
     commaIdx >= 0 ? dataUriOrRaw.slice(commaIdx + 1) : dataUriOrRaw;
@@ -37,7 +36,6 @@ function bufferFromBase64(dataUriOrRaw) {
 }
 
 function pickIncomingImage(req) {
-  // Return { buffer, mimeType, originalName } or null
   const f = req.file;
   const b64 = req.body.image_base64;
   if (f)
@@ -51,7 +49,7 @@ function pickIncomingImage(req) {
       buffer: bufferFromBase64(b64),
       mimeType: "image/jpeg",
       originalName: "upload.jpg",
-    }; // assume jpeg for base64
+    };
   return null;
 }
 
@@ -61,49 +59,50 @@ function pickIncomingImage(req) {
    Body:
      - user_id: number (required)
      - EITHER multipart file field name "file" OR JSON `image_base64`
-   Result: upsert user_photos, delete old file, save new
    ========================================================= */
 router.post("/photo", upload.single("file"), async (req, res) => {
   try {
     const user_id = Number(req.body.user_id);
-    if (!user_id)
+    if (!user_id) {
       return res
         .status(400)
         .json({ status: false, error: "user_id is required" });
+    }
 
     const img = pickIncomingImage(req);
-    if (!img)
+    if (!img) {
       return res.status(400).json({
         status: false,
         error: "No image provided. Send multipart 'file' or 'image_base64'.",
       });
+    }
 
-    // find existing photo
+    // find existing photo (so we can delete old file)
     const existing = await query(
       "SELECT file_path FROM dbo.user_photos WHERE user_id=@p0",
       [user_id]
     );
     const oldPath = existing.recordset[0]?.file_path;
 
-    // generate file name
+    // new file name
     const ext = mime.extension(img.mimeType) || "jpg";
     const safeRand = crypto.randomBytes(8).toString("hex");
     const filename = `${user_id}_${Date.now()}_${safeRand}.${ext}`;
     const absPath = path.join(UPLOAD_DIR, filename);
     const relPath = path.join("uploads", "faces", filename).replace(/\\/g, "/");
 
-    // write new file
     fs.writeFileSync(absPath, img.buffer);
 
     // upsert DB
-    let sql = `
+    const sql = `
       MERGE dbo.user_photos AS t
       USING (SELECT @p0 AS user_id, @p1 AS file_path) AS s
       ON (t.user_id = s.user_id)
       WHEN MATCHED THEN UPDATE SET file_path = s.file_path, updated_at = SYSUTCDATETIME()
       WHEN NOT MATCHED THEN INSERT (user_id, file_path) VALUES (s.user_id, s.file_path)
-      OUTPUT INSERTED.user_id, INSERTED.file_path;`;
-    const r = await query(sql, [user_id, relPath]);
+      OUTPUT INSERTED.user_id, INSERTED.file_path;
+    `;
+    await query(sql, [user_id, relPath]);
 
     // delete old file
     if (oldPath) {
@@ -139,17 +138,19 @@ router.post("/photo", upload.single("file"), async (req, res) => {
 router.post("/verify-user", upload.single("file"), async (req, res) => {
   try {
     const user_id = Number(req.body.user_id);
-    if (!user_id)
+    if (!user_id) {
       return res
         .status(400)
         .json({ status: false, error: "user_id is required" });
+    }
 
     const probe = pickIncomingImage(req);
-    if (!probe)
+    if (!probe) {
       return res.status(400).json({
         status: false,
         error: "No image provided. Send multipart 'file' or 'image_base64'.",
       });
+    }
 
     // find stored reference
     const existing = await query(
@@ -181,7 +182,6 @@ router.post("/verify-user", upload.single("file"), async (req, res) => {
     });
 
     const py = await fr.post("/verify", form, { headers: form.getHeaders() });
-    // Expect something like: { status:true, match:true/false, score: 0.87, ... }
     const data = py.data;
 
     return res.json({
