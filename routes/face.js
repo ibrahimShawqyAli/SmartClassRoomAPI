@@ -199,4 +199,4 @@ router.post("/verify-user", upload.single("file"), async (req, res) => {
   }
 });
 
-export default router;
+module.exports = router;
