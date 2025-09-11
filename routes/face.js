@@ -191,7 +191,6 @@ router.post("/verify-user", upload.single("file"), async (req, res) => {
     // Prefer explicit flags if present; otherwise derive from thresholds
     const derivedMatch =
       (typeof data.match === "boolean" ? data.match : null) ??
-      (typeof data.same_person === "boolean" ? data.same_person : null) ??
       (typeof data.similarity_percent === "number"
         ? data.similarity_percent >= SIMILARITY_THRESHOLD
         : null) ??
