@@ -26,7 +26,7 @@ app.use("/auth", require("./routes/auth"));
 app.use("/lectures", require("./routes/lectures"));
 app.use("/lecture-assignments", require("./routes/lectureAssignments"));
 app.use("/lecture-sessions", require("./routes/lectureSessions"));
-app.use("/fr", "./routes/face.js");
+app.use("/fr", require("./routes/face.js"));
 app.use("/attendance", require("./routes/attendance"));
 app.use("/reports", require("./routes/reports"));
 app.use("/weekly-reports", require("./routes/weeklySummary"));
