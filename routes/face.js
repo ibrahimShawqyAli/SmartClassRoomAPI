@@ -11,6 +11,29 @@ const http = require("http");
 const { query } = require("../DB/dbConnection"); // CJS import
 
 const router = express.Router();
+// Resolve user by either numeric user_id or email; returns { id, email } or null
+async function resolveUserId(user_id_raw, email_raw) {
+  // prefer user_id if provided and valid
+  const maybeId = Number(user_id_raw);
+  if (Number.isInteger(maybeId) && maybeId > 0) {
+    const r = await query("SELECT id, email FROM dbo.users WHERE id=@p0", [
+      maybeId,
+    ]);
+    if (r.recordset.length) return r.recordset[0];
+  }
+
+  // else try email
+  const email = (email_raw || "").trim();
+  if (email) {
+    const r = await query(
+      "SELECT id, email FROM dbo.users WHERE LOWER(email)=LOWER(@p0)",
+      [email]
+    );
+    if (r.recordset.length) return r.recordset[0];
+  }
+
+  return null;
+}
 
 /* ---------- Config ---------- */
 const UPLOAD_DIR = path.join(process.cwd(), "uploads", "faces");
@@ -62,12 +85,14 @@ function pickIncomingImage(req) {
    ========================================================= */
 router.post("/photo", upload.single("file"), async (req, res) => {
   try {
-    const user_id = Number(req.body.user_id);
-    if (!user_id) {
+    const { user_id: user_id_raw, email: email_raw } = req.body || {};
+    const resolved = await resolveUserId(user_id_raw, email_raw);
+    if (!resolved) {
       return res
-        .status(400)
-        .json({ status: false, error: "user_id is required" });
+        .status(404)
+        .json({ status: false, error: "User not found (by id or email)" });
     }
+    const user_id = resolved.id;
 
     const img = pickIncomingImage(req);
     if (!img) {
@@ -117,6 +142,7 @@ router.post("/photo", upload.single("file"), async (req, res) => {
     return res.json({
       status: true,
       user_id,
+      email: resolved.email,
       photo_url: `/${relPath}`,
     });
   } catch (e) {
@@ -137,12 +163,14 @@ router.post("/photo", upload.single("file"), async (req, res) => {
    ========================================================= */
 router.post("/verify-user", upload.single("file"), async (req, res) => {
   try {
-    const user_id = Number(req.body.user_id);
-    if (!user_id) {
+    const { user_id: user_id_raw, email: email_raw } = req.body || {};
+    const resolved = await resolveUserId(user_id_raw, email_raw);
+    if (!resolved) {
       return res
-        .status(400)
-        .json({ status: false, error: "user_id is required" });
+        .status(404)
+        .json({ status: false, error: "User not found (by id or email)" });
     }
+    const user_id = resolved.id;
 
     const probe = pickIncomingImage(req);
     if (!probe) {
@@ -209,6 +237,7 @@ router.post("/verify-user", upload.single("file"), async (req, res) => {
     return res.json({
       status: true,
       user_id,
+      email: resolved.email,
       match: derivedMatch,
       score, // could be percent or cosine (document which one you use)
       raw: data,
