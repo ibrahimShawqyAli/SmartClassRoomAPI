@@ -94,7 +94,7 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
     // The proc already SELECTs the full row; also outputs ids
     const row = result.recordset?.[0];
     return res.status(201).json({
-      ok: true,
+      status: true,
       courseId: result.output.CourseId,
       offeringId: result.output.OfferingId,
       offering: row || null,
@@ -106,77 +106,47 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
       // conflict from proc
       return res
         .status(409)
-        .json({ ok: false, error: "Room/time slot is already taken" });
+        .json({ status: false, error: "Room/time slot is already taken" });
     }
     if (num === 50010) {
       // bad time window
       return res
         .status(400)
-        .json({ ok: false, error: "StartTime must be before EndTime" });
+        .json({ status: false, error: "StartTime must be before EndTime" });
     }
 
     console.error("schedule offering error:", err);
-    return res.status(500).json({ ok: false, error: "Server error" });
+    return res.status(500).json({ status: false, error: "Server error" });
   }
 });
 
 /**
  * GET /dashboard/offerings
  */
-router.get("/", auth, requireAdmin, async (req, res) => {
+router.get("/", auth, requireAdmin, async (_req, res) => {
   try {
-    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const pageSize = Math.min(
-      Math.max(parseInt(req.query.pageSize || "20", 10), 1),
-      100
-    );
-    const search = (req.query.search || "").trim();
-
-    const where = search ? "WHERE c.code LIKE @p0 OR c.name LIKE @p1" : "";
-
-    // total count
-    const countParams = search ? [`%${search}%`, `%${search}%`] : [];
-    const countSql = `
-      SELECT COUNT(*) AS total
-      FROM dbo.offerings o
-      JOIN dbo.courses  c ON c.id = o.course_id
-      ${where};
-    `;
-    const total = (await query(countSql, countParams)).recordset[0].total;
-
-    // page slice
-    const offset = (page - 1) * pageSize;
-    const dataParams = search
-      ? [`%${search}%`, `%${search}%`, offset, pageSize]
-      : [offset, pageSize];
-
-    const dataSql = `
-      SELECT 
-        o.id         AS offering_id,
-        c.name       AS course_name,
-        c.code       AS course_code
-      FROM dbo.offerings o
-      JOIN dbo.courses  c ON c.id = o.course_id
-      ${where}
-      ORDER BY o.id DESC
-      OFFSET @p${search ? 2 : 0} ROWS FETCH NEXT @p${search ? 3 : 1} ROWS ONLY;
-    `;
-
-    const rows = (await query(dataSql, dataParams)).recordset || [];
-
-    return res.json({
-      ok: true,
-      page,
-      pageSize,
-      total,
-      totalPages: Math.ceil(total / pageSize),
-      data: rows,
-    });
-  } catch (err) {
-    console.error("List offerings error:", err);
-    return res.status(500).json({ ok: false, error: "Server error" });
+    const r = await query(`
+      SELECT o.id, c.name AS course_name, o.term_id, o.section_id, o.group_id,
+             o.primary_room_id, o.day_of_week,
+             CONVERT(varchar(8), o.start_time, 108) AS start_time,
+             CONVERT(varchar(8), o.end_time,   108) AS end_time,
+             o.duration_minutes,
+             t.name AS term_name, s.name AS section_name, g.name AS group_name, r.name AS room_name
+      FROM dbo.course_offerings o
+      JOIN dbo.courses c       ON c.id = o.course_id
+      LEFT JOIN dbo.terms t    ON t.id = o.term_id
+      LEFT JOIN dbo.sections s ON s.id = o.section_id
+      LEFT JOIN dbo.groups g   ON g.id = o.group_id
+      LEFT JOIN dbo.rooms  r   ON r.id = o.primary_room_id
+      ORDER BY c.name, o.day_of_week, o.start_time, o.id
+    `);
+    res.json({ status: true, offerings: r.recordset });
+  } catch (e) {
+    console.error("List offerings error:", e);
+    res.status(500).json({ status: false, error: "Server error" });
   }
 });
+
 /**
  * POST /dashboard/offerings
  * Body: {
