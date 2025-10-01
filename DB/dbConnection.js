@@ -2,26 +2,46 @@
 const sql = require("mssql");
 require("dotenv").config();
 
-const pool = new sql.ConnectionPool({
-  server: process.env.SQL_SERVER,
-  database: process.env.SQL_DB,
-  user: process.env.SQL_USER,
-  password: process.env.SQL_PASSWORD,
+const config = {
+  server: process.env.SQL_SERVER, // e.g., "localhost"
+  database: process.env.SQL_DB, // "collegeDB"
+  user: process.env.SQL_USER, // "college_user"
+  password: process.env.SQL_PASSWORD, // "Mypass_VisionValley_2025"
+  port: 1433, // <-- TOP LEVEL (not in options)
   options: {
-    encrypt: process.env.SQL_ENCRYPT === "true",
-    trustServerCertificate: process.env.SQL_TRUST_CERT === "true",
-    port: 1433,
+    encrypt: process.env.SQL_ENCRYPT === "true", // usually true
+    trustServerCertificate: process.env.SQL_TRUST_CERT === "true", // often true for local dev
   },
   pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
-});
+};
 
+const pool = new sql.ConnectionPool(config);
 let poolPromise;
+
 function getPool() {
-  if (!poolPromise) poolPromise = pool.connect();
+  if (!poolPromise) {
+    poolPromise = pool.connect().catch((err) => {
+      console.error("SQL pool connect error:", err);
+      // rethrow so callers see the failure
+      throw err;
+    });
+    // log once connected
+    pool.on("connect", () => {
+      console.log("SQL connected:", {
+        server: config.server,
+        db: config.database,
+        encrypt: config.options.encrypt,
+        trustServerCertificate: config.options.trustServerCertificate,
+        port: config.port,
+      });
+    });
+    pool.on("error", (err) => {
+      console.error("SQL pool runtime error:", err);
+    });
+  }
   return poolPromise;
 }
 
-// plain text query (you already had this)
 async function query(q, params = []) {
   const p = await getPool();
   const request = p.request();
@@ -29,14 +49,11 @@ async function query(q, params = []) {
   return request.query(q);
 }
 
-/* ---------- ADD BELOW: typed inputs + execProc helper ---------- */
 function addInputs(request, params = {}, types = {}) {
-  // params: { name: value, ... }
-  // types:  { name: sql.Type, ... }  // optional per-param override
   for (const [name, value] of Object.entries(params)) {
     const t = types[name];
     if (t) request.input(name, t, value);
-    else request.input(name, value); // let mssql infer if type not provided
+    else request.input(name, value);
   }
   return request;
 }
@@ -47,7 +64,6 @@ async function execProc(procName, params = {}, types = {}) {
   return request.execute(procName);
 }
 
-/* Common type aliases you’ll use when calling execProc */
 const TYPES = {
   Int: sql.Int,
   TinyInt: sql.TinyInt,
@@ -59,7 +75,6 @@ const TYPES = {
   Bit: sql.Bit,
 };
 
-/* Optional: expose a close() for tests/shutdowns */
 async function close() {
   if (poolPromise) {
     const p = await poolPromise;
