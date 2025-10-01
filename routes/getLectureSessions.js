@@ -1,81 +1,104 @@
-// routes/lectureSessions.js  (append this endpoint)
+// routes/lectureSessions.js
 const express = require("express");
 const router = express.Router();
 const { query } = require("../DB/dbConnection");
 const auth = require("../middleware/auth");
 
+// Read user from either req.auth (new) or req.user (old)
+function getReqUser(req) {
+  const src = req.auth || req.user || {};
+  return { id: src.id, role: (src.role || "").toLowerCase() };
+}
+
 /**
  * POST /lecture-sessions/list
- * Header: Authorization: Bearer <JWT>
- * Body: { lecture_id }
+ * Body: { offering_id }
  *
- * Returns ALL sessions for the given lecture, in UTC:
- * - id, lecture_id
+ * Returns ALL sessions for the given offering (UTC datetimes):
+ * - id, offering_id
  * - planned_start_utc, planned_end_utc
  * - status ('planned','started','ended','cancelled')
  * - started_at, ended_at
- * - week_index (0..15) relative to the first session
+ * - week_index (0..15) relative to the first planned session
  *
- * Access: user must be assigned to that lecture (student/teacher) or be admin
+ * Access: user must be assigned to that offering (student/teacher) or be admin
  */
-// routes/lectureSessions.js (replace your /list handler with this)
 router.post("/list", auth, async (req, res) => {
   try {
-    const { lecture_id } = req.body || {};
-    if (!lecture_id) {
+    const { id: userId, role } = getReqUser(req);
+    const { offering_id } = req.body || {};
+
+    if (!offering_id) {
       return res
         .status(400)
-        .json({ status: false, error: "lecture_id is required" });
+        .json({ status: false, error: "offering_id is required" });
     }
 
-    // Check assignment (unless admin)
-    if (req.user.role !== "admin") {
-      const a = await query(
-        `SELECT 1
-           FROM dbo.lecture_assignments
-          WHERE lecture_id=@p0 AND user_id=@p1`,
-        [lecture_id, req.user.id]
+    // --- Permission check ---
+    if (role !== "admin") {
+      // Prefer new table offering_assignments; fallback to legacy mapping if needed
+      let hasNew = await query(
+        "SELECT 1 AS ok FROM sys.objects WHERE name='offering_assignments' AND type='U'"
       );
-      if (!a.recordset.length) {
+
+      let perm;
+      if (hasNew.recordset.length) {
+        perm = await query(
+          `SELECT TOP 1 1
+             FROM dbo.offering_assignments
+            WHERE offering_id=@p0 AND user_id=@p1`,
+          [offering_id, userId]
+        );
+      } else {
+        perm = await query(
+          `SELECT TOP 1 1
+             FROM dbo.map_lecture_offering M
+             JOIN dbo.lecture_assignments A ON A.lecture_id = M.lecture_id
+            WHERE M.offering_id=@p0 AND A.user_id=@p1`,
+          [offering_id, userId]
+        );
+      }
+
+      if (!perm.recordset.length) {
         return res
           .status(403)
-          .json({ status: false, error: "Not assigned to this lecture" });
+          .json({ status: false, error: "Not assigned to this offering" });
       }
     }
 
-    // No JOIN — use a CTE to compute UTC start/end once, then window MIN for week_index
+    // --- Sessions for this offering (NEW: dbo.course_sessions) ---
     const sql = `
       WITH base AS (
         SELECT
           s.id,
-          s.lecture_id,
-          DATEADD(SECOND, DATEDIFF(SECOND, 0, s.planned_start_time), CAST(s.planned_date AS DATETIME2)) AS planned_start_utc,
-          DATEADD(SECOND, DATEDIFF(SECOND, 0, s.planned_end_time),   CAST(s.planned_date AS DATETIME2)) AS planned_end_utc,
+          s.offering_id,
+          s.planned_start_utc,
+          s.planned_end_utc,
           s.status,
           s.started_at,
           s.ended_at
-        FROM dbo.lecture_sessions s
-        WHERE s.lecture_id = @p0
+        FROM dbo.course_sessions s
+        WHERE s.offering_id = @p0
       )
       SELECT
         b.*,
         DATEDIFF(
           WEEK,
-          MIN(b.planned_start_utc) OVER (PARTITION BY b.lecture_id),
+          MIN(b.planned_start_utc) OVER (PARTITION BY b.offering_id),
           b.planned_start_utc
         ) AS week_index
       FROM base b
       ORDER BY b.planned_start_utc ASC, b.id ASC;
     `;
 
-    const r = await query(sql, [lecture_id]);
+    const r = await query(sql, [offering_id]);
 
     return res.json({
       status: true,
       count: r.recordset.length,
       sessions: r.recordset.map((row) => ({
         id: row.id,
-        lecture_id: row.lecture_id,
+        offering_id: row.offering_id,
         planned_start_utc: row.planned_start_utc,
         planned_end_utc: row.planned_end_utc,
         status: row.status,
@@ -88,7 +111,7 @@ router.post("/list", auth, async (req, res) => {
     console.error("list sessions error:", e);
     return res
       .status(500)
-      .json({ status: false, error: "Failed to fetch lecture sessions" });
+      .json({ status: false, error: "Failed to fetch sessions" });
   }
 });
 

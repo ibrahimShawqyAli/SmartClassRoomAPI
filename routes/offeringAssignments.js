@@ -1,32 +1,34 @@
+// routes/offeringAssignments.js
 const express = require("express");
 const router = express.Router();
 const { query } = require("../DB/dbConnection");
 
 /**
- * POST /lecture-assignments
- * Body: { lecture_id, user_id }
+ * POST /offering-assignments
+ * Body: { offering_id, user_id }
  * - Validates both exist
  * - Derives role from users.role (must be 'student' or 'teacher')
- * - Inserts into dbo.lecture_assignments (unique on (lecture_id, user_id))
+ * - Inserts into dbo.offering_assignments (unique on (offering_id, user_id))
  */
 router.post("/", async (req, res) => {
   try {
-    const { lecture_id, user_id } = req.body;
+    const { offering_id, user_id } = req.body;
 
-    if (!lecture_id || !user_id) {
+    if (!offering_id || !user_id) {
       return res
         .status(400)
-        .json({ status: false, error: "lecture_id and user_id are required" });
+        .json({ status: false, error: "offering_id and user_id are required" });
     }
 
-    // 1) Check lecture exists
-    const lec = await query("SELECT id FROM dbo.lectures WHERE id=@p0", [
-      lecture_id,
-    ]);
-    if (lec.recordset.length === 0) {
+    // 1) Check offering exists
+    const off = await query(
+      "SELECT id FROM dbo.course_offerings WHERE id=@p0",
+      [offering_id]
+    );
+    if (off.recordset.length === 0) {
       return res
         .status(404)
-        .json({ status: false, error: "Lecture not found" });
+        .json({ status: false, error: "Offering not found" });
     }
 
     // 2) Get user & role
@@ -48,36 +50,41 @@ router.post("/", async (req, res) => {
 
     // 3) Insert assignment
     const ins = `
-      INSERT INTO dbo.lecture_assignments (lecture_id, user_id, role)
+      INSERT INTO dbo.offering_assignments (offering_id, user_id, role)
       VALUES (@p0, @p1, @p2)
     `;
-    await query(ins, [lecture_id, user_id, user.role]);
+    await query(ins, [offering_id, user_id, user.role]);
 
     return res.json({
       status: true,
-      message: `Assigned ${user.role} (user_id=${user_id}) to lecture ${lecture_id}`,
+      message: `Assigned ${user.role} (user_id=${user_id}) to offering ${offering_id}`,
     });
   } catch (err) {
     // Duplicate (already assigned)
     if (err.number === 2627 || err.number === 2601) {
       return res.status(409).json({
         status: false,
-        error: "User already assigned to this lecture",
+        error: "User already assigned to this offering",
       });
     }
-    // FK violations (bad ids) -> just in case
+    // FK violations (bad ids)
     if (err.number === 547) {
       return res
         .status(400)
-        .json({ status: false, error: "Invalid lecture_id or user_id" });
+        .json({ status: false, error: "Invalid offering_id or user_id" });
     }
-    console.error("Assign lecture error:", err);
+    console.error("Assign offering error:", err);
     return res
       .status(500)
-      .json({ status: false, error: "Failed to assign user to lecture" });
+      .json({ status: false, error: "Failed to assign user to offering" });
   }
 });
-// Get all assigned lectures for a user, grouped by day_of_week (0..6)
+
+/**
+ * POST /offering-assignments/my-week
+ * Body: { user_id }
+ * Returns all assigned offerings for this user grouped by day_of_week
+ */
 router.post("/my-week", async (req, res) => {
   try {
     const { user_id } = req.body;
@@ -90,19 +97,21 @@ router.post("/my-week", async (req, res) => {
     // Pull all assignments for the user
     const sql = `
       SELECT
-        l.day_of_week,
-        l.id           AS lecture_id,
-        l.name,
-        l.place,
-        l.start_date,
-        CONVERT(VARCHAR(8), l.start_time, 108) AS start_time, -- "HH:mm:ss"
-        CONVERT(VARCHAR(8), l.end_time,   108) AS end_time,   -- computed HH:mm:ss
-        l.duration_minutes,
-        la.role
-      FROM dbo.lecture_assignments la
-      JOIN dbo.lectures l ON l.id = la.lecture_id
-      WHERE la.user_id = @p0
-      ORDER BY l.day_of_week, l.start_time, l.place, l.id;
+        cs.day_of_week,
+        o.id           AS offering_id,
+        c.name         AS subject,
+        r.name         AS room,
+        CONVERT(VARCHAR(8), cs.start_time, 108) AS start_time, -- "HH:mm:ss"
+        CONVERT(VARCHAR(8), cs.end_time,   108) AS end_time,   -- "HH:mm:ss"
+        cs.duration_minutes,
+        a.role
+      FROM dbo.offering_assignments a
+      JOIN dbo.course_offerings o ON o.id = a.offering_id
+      JOIN dbo.courses c ON c.id = o.course_id
+      JOIN dbo.course_sessions cs ON cs.offering_id = o.id
+      LEFT JOIN dbo.rooms r ON r.id = cs.room_id
+      WHERE a.user_id = @p0
+      ORDER BY cs.day_of_week, cs.start_time, r.name, o.id;
     `;
     const r = await query(sql, [user_id]);
 
@@ -110,14 +119,13 @@ router.post("/my-week", async (req, res) => {
     const week = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
     for (const row of r.recordset) {
       week[String(row.day_of_week)].push({
-        lecture_id: row.lecture_id,
-        name: row.name,
-        place: row.place,
-        start_date: row.start_date, // first calendar date
-        start_time: row.start_time, // "HH:mm:ss"
-        end_time: row.end_time, // "HH:mm:ss"
+        offering_id: row.offering_id,
+        subject: row.subject,
+        room: row.room,
+        start_time: row.start_time,
+        end_time: row.end_time,
         duration_minutes: row.duration_minutes,
-        role: row.role, // 'student' or 'teacher'
+        role: row.role,
       });
     }
 

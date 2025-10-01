@@ -1,40 +1,46 @@
-// routes/adminOps.js
 const express = require("express");
 const router = express.Router();
 const { query } = require("../DB/dbConnection");
 const auth = require("../middleware/auth");
 
+// helper to read user/role from either req.auth or req.user
+function getReqUser(req) {
+  const src = req.auth || req.user || {};
+  return { id: src.id, role: (src.role || "").toLowerCase(), email: src.email };
+}
+
 /**
  * POST /admin/reset-udid
  * Body: { email }
  *
- * Behavior:
- * - Finds the user by email.
- * - Deletes any rows from dbo.devices for that user (effectively unbinding UDID).
- * Permissions:
- * - Admins can reset any user.
- * - A user can reset their own UDID (email must match their account).
+ * Admins can reset anyone. A user can reset their own UDID.
  */
 router.post("/reset-udid", auth, async (req, res) => {
   try {
-    const { email } = req.body || {};
-    if (!email) {
+    const { id: requesterId, role: requesterRole } = getReqUser(req);
+
+    let { email } = req.body || {};
+    if (typeof email !== "string" || !email.trim()) {
       return res
         .status(400)
         .json({ status: false, error: "email is required" });
     }
+    email = email.trim();
 
-    // 1) find the user by email
-    const u = await query("SELECT id, email FROM dbo.users WHERE email=@p0", [
-      email,
-    ]);
+    // 1) find the user by email (case-insensitive)
+    const u = await query(
+      "SELECT id, email FROM dbo.users WHERE LOWER(email)=LOWER(@p0)",
+      [email]
+    );
     if (!u.recordset.length) {
       return res.status(404).json({ status: false, error: "User not found" });
     }
     const target = u.recordset[0];
 
     // 2) permission: admin OR same user
-    if (req.user.role !== "admin" && req.user.id !== target.id) {
+    const isAdmin = requesterRole === "admin";
+    const isSelf = requesterId === target.id;
+    if (!isAdmin && !isSelf) {
       return res.status(403).json({ status: false, error: "Forbidden" });
     }
 
@@ -43,11 +49,12 @@ router.post("/reset-udid", auth, async (req, res) => {
       "DELETE FROM dbo.devices WHERE user_id=@p0; SELECT @@ROWCOUNT AS removed;",
       [target.id]
     );
+    // Alternative (without SELECT): const removed = del.rowsAffected?.[0] || 0;
 
     return res.json({
       status: true,
       message: "UDID reset successfully",
-      removed: del.recordset[0].removed, // number of device rows removed
+      removed: del.recordset[0].removed,
       user_id: target.id,
       email: target.email,
     });
@@ -61,21 +68,34 @@ router.post("/reset-udid", auth, async (req, res) => {
  * POST /admin/set-modulation
  * Body: { lecture_id, modulation_string }
  *
- * Behavior:
- * - Updates dbo.lectures.modulation_string.
- * Permissions:
- * - Admins always allowed.
- * - Teachers only if they are assigned to that lecture as 'teacher'.
+ * Admins always allowed.
+ * Teachers only if assigned to that lecture as 'teacher'.
  */
 router.post("/set-modulation", auth, async (req, res) => {
   try {
+    const { id: requesterId, role: requesterRole } = getReqUser(req);
+
     const { lecture_id, modulation_string } = req.body || {};
-    if (!lecture_id || typeof modulation_string !== "string") {
+    if (
+      !Number.isInteger(lecture_id) ||
+      typeof modulation_string !== "string"
+    ) {
       return res.status(400).json({
         status: false,
-        error: "lecture_id and modulation_string are required",
+        error: "lecture_id (int) and modulation_string (string) are required",
       });
     }
+
+    const mod = modulation_string.trim();
+    if (!mod) {
+      return res
+        .status(400)
+        .json({ status: false, error: "modulation_string cannot be empty" });
+    }
+    // Optional: enforce only 0/1 and a sensible length (uncomment if needed)
+    // if (!/^[01]{4,64}$/.test(mod)) {
+    //   return res.status(400).json({ status: false, error: "modulation_string must be 0/1 only (len 4..64)" });
+    // }
 
     // 1) ensure lecture exists
     const lec = await query("SELECT id FROM dbo.lectures WHERE id=@p0", [
@@ -88,11 +108,12 @@ router.post("/set-modulation", auth, async (req, res) => {
     }
 
     // 2) permissions: admin OR assigned teacher
-    if (req.user.role !== "admin") {
+    if (requesterRole !== "admin") {
       const a = await query(
-        `SELECT 1 FROM dbo.lecture_assignments
-         WHERE lecture_id=@p0 AND user_id=@p1 AND role='teacher'`,
-        [lecture_id, req.user.id]
+        `SELECT TOP 1 1
+           FROM dbo.lecture_assignments
+          WHERE lecture_id=@p0 AND user_id=@p1 AND LOWER(role)='teacher'`,
+        [lecture_id, requesterId]
       );
       if (!a.recordset.length) {
         return res.status(403).json({
@@ -105,10 +126,10 @@ router.post("/set-modulation", auth, async (req, res) => {
     // 3) update
     const up = await query(
       `UPDATE dbo.lectures
-         SET modulation_string=@p1
-       WHERE id=@p0;
-       SELECT @@ROWCOUNT AS affected;`,
-      [lecture_id, modulation_string.trim()]
+          SET modulation_string=@p1
+        WHERE id=@p0;
+        SELECT @@ROWCOUNT AS affected;`,
+      [lecture_id, mod]
     );
 
     if (!up.recordset[0].affected) {
@@ -118,7 +139,7 @@ router.post("/set-modulation", auth, async (req, res) => {
     return res.json({
       status: true,
       lecture_id,
-      modulation_string: modulation_string.trim(),
+      modulation_string: mod,
       message: "modulation_string updated",
     });
   } catch (e) {

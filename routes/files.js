@@ -1,3 +1,4 @@
+// routes/files.js  (updated for new schema)
 const express = require("express");
 const router = express.Router();
 const path = require("path");
@@ -27,8 +28,7 @@ const upload = multer({
   storage,
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
   fileFilter: (req, file, cb) => {
-    // Example: allow common docs/images/zips
-    const allowed = [
+    const allowed = new Set([
       "application/pdf",
       "application/zip",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -40,55 +40,56 @@ const upload = multer({
       "text/plain",
       "application/vnd.openxmlformats-officedocument.presentationml.presentation",
       "application/vnd.ms-powerpoint",
-    ];
-    if (allowed.includes(file.mimetype)) cb(null, true);
-    else cb(new Error("Unsupported file type"));
+    ]);
+    cb(allowed.has(file.mimetype) ? null : new Error("Unsupported file type"));
   },
 });
 
 /* ---------- Helpers ---------- */
+function getReqUser(req) {
+  const src = req.auth || req.user || {};
+  return { id: src.id, role: (src.role || "").toLowerCase() };
+}
 
-// Check that user is assigned to lecture with role
-async function getAssignmentRole(lectureId, userId) {
+// NEW: get course session (not lecture session)
+async function getSession(sessionId) {
   const r = await query(
-    `SELECT role FROM dbo.lecture_assignments WHERE lecture_id=@p0 AND user_id=@p1`,
-    [lectureId, userId]
+    `SELECT id, offering_id, planned_start_utc, planned_end_utc
+       FROM dbo.course_sessions
+      WHERE id=@p0`,
+    [sessionId]
+  );
+  return r.recordset[0] || null;
+}
+
+// NEW: check assignment on offering
+async function getOfferingRole(offeringId, userId) {
+  const r = await query(
+    `SELECT role FROM dbo.offering_assignments
+      WHERE offering_id=@p0 AND user_id=@p1`,
+    [offeringId, userId]
   );
   return r.recordset[0]?.role || null;
 }
 
-// Get a session and lecture_id by session_id
-async function getSession(sessionId) {
-  const r = await query(`SELECT * FROM dbo.lecture_sessions WHERE id=@p0`, [
-    sessionId,
-  ]);
-  return r.recordset[0] || null;
-}
-
-// Ensure session belongs to lecture and is for today (optional)
-function isToday(dateLike) {
-  const d = new Date(dateLike);
-  const today = new Date();
-  const iso = (x) => x.toISOString().slice(0, 10);
-  return iso(d) === iso(today);
-}
-
 /* =========================================================
-   1) Teacher upload a file to a session
+   1) Teacher uploads a file to a session
    POST /files/upload
-   Body (multipart/form-data): { session_id, title? , file }
-   Auth: teacher assigned to that lecture or admin
+   Body (multipart/form-data): { session_id, title?, file }
+   Auth: teacher assigned to that offering, or admin
    ========================================================= */
 router.post("/upload", auth, upload.single("file"), async (req, res) => {
   try {
-    const { session_id, title } = req.body;
+    const { id: userId, role: userRole } = getReqUser(req);
+    const { session_id, title } = req.body || {};
+
     if (!session_id) {
-      // cleanup uploaded temp file if any
       if (req.file) fs.unlinkSync(req.file.path);
       return res
         .status(400)
         .json({ status: false, error: "session_id is required" });
     }
+
     const session = await getSession(Number(session_id));
     if (!session) {
       if (req.file) fs.unlinkSync(req.file.path);
@@ -97,45 +98,35 @@ router.post("/upload", auth, upload.single("file"), async (req, res) => {
         .json({ status: false, error: "Session not found" });
     }
 
-    // Who owns this session?
-    const lectureId = session.lecture_id;
-
-    // Check teacher assignment
-    const assignRole = await getAssignmentRole(lectureId, req.user.id);
-    const isTeacher = assignRole === "teacher" || req.user.role === "admin";
+    // only assigned teacher or admin can upload
+    const assignRole = await getOfferingRole(session.offering_id, userId);
+    const isTeacher = assignRole === "teacher" || userRole === "admin";
     if (!isTeacher) {
       if (req.file) fs.unlinkSync(req.file.path);
-      return res.status(403).json({
-        status: false,
-        error: "Only assigned teacher/admin can upload",
-      });
+      return res
+        .status(403)
+        .json({
+          status: false,
+          error: "Only assigned teacher/admin can upload",
+        });
     }
-
-    // (optional) only allow upload for today's session
-    // if (!isToday(session.planned_date)) {
-    //   if (req.file) fs.unlinkSync(req.file.path);
-    //   return res.status(400).json({ status: false, error: "Can only upload to today's session" });
-    // }
 
     if (!req.file) {
       return res.status(400).json({ status: false, error: "file is required" });
     }
 
-    const filePath = req.file.path; // server path
-    const originalName = req.file.originalname;
-    const finalTitle = title?.trim() || originalName;
+    // Store a URL relative to server root; static is already mounted at /uploads
+    const fileUrl = `/uploads/${path.basename(req.file.path)}`;
+    const finalTitle = (title || req.file.originalname || "file").trim();
 
-    // Save metadata in posts
-    // posts: (session_id, user_id, type='file', title, file_url)
     const ins = `
-        INSERT INTO dbo.posts (session_id, user_id, [type], title, file_url, created_at)
-        OUTPUT INSERTED.id
-        VALUES (@p0, @p1, 'file', @p2, @p3, SYSUTCDATETIME())
-      `;
-    const fileUrl = `/uploads/${path.basename(filePath)}`; // stored link (relative)
+      INSERT INTO dbo.posts (session_id, user_id, [type], title, file_url, created_at)
+      OUTPUT INSERTED.id
+      VALUES (@p0, @p1, 'file', @p2, @p3, SYSUTCDATETIME());
+    `;
     const r = await query(ins, [
       Number(session_id),
-      req.user.id,
+      userId,
       finalTitle,
       fileUrl,
     ]);
@@ -150,7 +141,6 @@ router.post("/upload", auth, upload.single("file"), async (req, res) => {
     });
   } catch (err) {
     console.error("upload error:", err);
-    // try to cleanup file on error
     if (req.file && fs.existsSync(req.file.path)) {
       try {
         fs.unlinkSync(req.file.path);
@@ -163,10 +153,11 @@ router.post("/upload", auth, upload.single("file"), async (req, res) => {
 /* =========================================================
    2) List files for a session
    GET /files/list?session_id=123
-   Auth: assigned to lecture (student/teacher/admin)
+   Auth: assigned (student/teacher) to that offering, or admin
    ========================================================= */
 router.get("/list", auth, async (req, res) => {
   try {
+    const { id: userId, role: userRole } = getReqUser(req);
     const session_id = Number(req.query.session_id);
     if (!session_id)
       return res
@@ -179,22 +170,22 @@ router.get("/list", auth, async (req, res) => {
         .status(404)
         .json({ status: false, error: "Session not found" });
 
-    const lectureId = session.lecture_id;
-    const assignRole = await getAssignmentRole(lectureId, req.user.id);
-    if (!assignRole && req.user.role !== "admin") {
+    const assignRole = await getOfferingRole(session.offering_id, userId);
+    if (!assignRole && userRole !== "admin") {
       return res
         .status(403)
-        .json({ status: false, error: "Not assigned to this lecture" });
+        .json({ status: false, error: "Not assigned to this course" });
     }
 
     const sql = `
       SELECT p.id AS post_id, p.title, p.file_url, p.created_at, u.name AS uploaded_by
-      FROM dbo.posts p
-      JOIN dbo.users u ON u.id = p.user_id
-      WHERE p.session_id=@p0 AND p.[type]='file'
-      ORDER BY p.created_at DESC
+        FROM dbo.posts p
+        JOIN dbo.users u ON u.id = p.user_id
+       WHERE p.session_id=@p0 AND p.[type]='file'
+       ORDER BY p.created_at DESC;
     `;
     const r = await query(sql, [session_id]);
+
     return res.json({
       status: true,
       count: r.recordset.length,
@@ -211,16 +202,23 @@ router.get("/list", auth, async (req, res) => {
 /* =========================================================
    3) Download a file by post_id
    GET /files/download/:postId
-   Auth: assigned to lecture (student/teacher/admin)
+   Auth: assigned (student/teacher) to that offering, or admin
    ========================================================= */
 router.get("/download/:postId", auth, async (req, res) => {
   try {
-    const postId = Number(req.query.postId);
+    const { id: userId, role: userRole } = getReqUser(req);
+    const postId = Number(req.params.postId);
+    if (!postId)
+      return res
+        .status(400)
+        .json({ status: false, error: "postId is required" });
+
+    // Join via NEW course_sessions to resolve offering_id
     const sql = `
-      SELECT p.*, s.lecture_id
-      FROM dbo.posts p
-      JOIN dbo.lecture_sessions s ON s.id = p.session_id
-      WHERE p.id=@p0 AND p.[type]='file'
+      SELECT p.id, p.session_id, p.title, p.file_url, s.offering_id
+        FROM dbo.posts p
+        JOIN dbo.course_sessions s ON s.id = p.session_id
+       WHERE p.id=@p0 AND p.[type]='file';
     `;
     const r = await query(sql, [postId]);
     if (!r.recordset.length)
@@ -228,29 +226,29 @@ router.get("/download/:postId", auth, async (req, res) => {
 
     const P = r.recordset[0];
 
-    // must be assigned
-    const assignRole = await getAssignmentRole(P.lecture_id, req.user.id);
-    if (!assignRole && req.user.role !== "admin") {
+    // must be assigned to the offering
+    const assignRole = await getOfferingRole(P.offering_id, userId);
+    if (!assignRole && userRole !== "admin") {
       return res
         .status(403)
-        .json({ status: false, error: "Not assigned to this lecture" });
+        .json({ status: false, error: "Not assigned to this course" });
     }
 
-    // resolve file on disk
+    // resolve file on disk safely
     if (!P.file_url || !P.file_url.startsWith("/uploads/")) {
       return res
         .status(410)
         .json({ status: false, error: "File path invalid" });
     }
-    const filePath = path.join(process.cwd(), P.file_url);
+    const filename = path.basename(P.file_url); // prevent path traversal
+    const filePath = path.join(UPLOAD_DIR, filename);
     if (!fs.existsSync(filePath)) {
       return res
         .status(410)
         .json({ status: false, error: "File missing from server" });
     }
 
-    // stream download
-    res.download(filePath, P.title || path.basename(filePath));
+    return res.download(filePath, P.title || filename);
   } catch (err) {
     console.error("download error:", err);
     return res.status(500).json({ status: false, error: "Download failed" });

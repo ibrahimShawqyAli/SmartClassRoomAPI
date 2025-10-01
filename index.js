@@ -20,24 +20,38 @@ app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 // health
 app.get("/", (req, res) => res.json({ ok: true }));
 
-// routes
-app.use("/", require("./routes/lectureDetails"));
+/* ============== ROUTES ============== */
+// offering details (GET /offering-details?offering_id=...)
+app.use("/", require("./routes/offeringDetails.js"));
+
+// auth
 app.use("/auth", require("./routes/auth"));
-app.use("/lectures", require("./routes/lectures"));
-app.use("/lecture-assignments", require("./routes/lectureAssignments"));
-app.use("/lecture-sessions", require("./routes/lectureSessions"));
+
+// NEW offering-based routes
+app.use("/offerings", require("./routes/offerings.js"));
+app.use("/offering-assignments", require("./routes/offeringAssignments.js"));
+app.use("/sessions", require("./routes/sessions.js"));
+
+app.use("/lectures", require("./routes/offerings.js"));
+app.use("/lecture-assignments", require("./routes/offeringAssignments.js"));
+app.use("/lecture-sessions", require("./routes/getLectureSessions.js"));
+// Face recognition, attendance, reports, weekly summary
 app.use("/fr", require("./routes/face.js"));
 app.use("/attendance", require("./routes/attendance"));
 app.use("/reports", require("./routes/reports"));
-app.use("/weekly-reports", require("./routes/weeklySummary"));
+app.use("/weekly-reports", require("./routes/summary.js"));
 app.use("/files", require("./routes/files"));
 app.use("/admin", require("./routes/adminOps"));
+
+// Admin dashboard
+app.use("/dashboard", require("./dashboard_routes/index.js"));
 
 // 404
 app.use((req, res) =>
   res.status(404).json({ status: false, error: "Not found", path: req.path })
 );
 
+/* ============== SOCKET.IO ============== */
 // Socket.IO auth
 io.use((socket, next) => {
   try {
@@ -52,25 +66,83 @@ io.use((socket, next) => {
   }
 });
 
-// join/leave lecture rooms
+// helper: join offering rooms with permission check
+async function joinOfferingRooms(socket, offeringId) {
+  const uid = socket.user.id;
+  const role = (socket.user.role || "").toLowerCase();
+
+  // admin can always join; otherwise must be assigned
+  if (role !== "admin") {
+    const r = await query(
+      `SELECT role FROM dbo.offering_assignments WHERE offering_id=@p0 AND user_id=@p1`,
+      [offeringId, uid]
+    );
+    if (!r.recordset.length) {
+      socket.emit("join-denied", {
+        offering_id: offeringId,
+        reason: "not assigned",
+      });
+      return;
+    }
+    const assignedRole = (r.recordset[0].role || "").toLowerCase();
+    if (assignedRole === "student") socket.join(`off:${offeringId}:students`);
+    if (assignedRole === "teacher") socket.join(`off:${offeringId}:teachers`);
+  } else {
+    // admin joins both teacher & student rooms logically
+    socket.join(`off:${offeringId}:teachers`);
+    socket.join(`off:${offeringId}:students`);
+  }
+
+  socket.join(`off:${offeringId}:all`);
+  socket.emit("join-ok", { offering_id: offeringId, role });
+}
+
+function leaveOfferingRooms(socket, offeringId) {
+  socket.leave(`off:${offeringId}:students`);
+  socket.leave(`off:${offeringId}:teachers`);
+  socket.leave(`off:${offeringId}:all`);
+}
+
 io.on("connection", (socket) => {
+  // New events (preferred)
+  socket.on("join-offering", async (offeringId) => {
+    try {
+      await joinOfferingRooms(socket, offeringId);
+    } catch (e) {
+      console.error("join-offering error:", e);
+      socket.emit("join-denied", {
+        offering_id: offeringId,
+        reason: "server error",
+      });
+    }
+  });
+
+  socket.on("leave-offering", (offeringId) => {
+    leaveOfferingRooms(socket, offeringId);
+  });
+
+  // Backward-compatible legacy events (map to new)
   socket.on("join-lecture", async (lectureId) => {
     try {
-      const r = await query(
-        `SELECT role FROM dbo.lecture_assignments WHERE lecture_id=@p0 AND user_id=@p1`,
-        [lectureId, socket.user.id]
+      // find mapped offering (if map table exists)
+      const m = await query(
+        `SELECT offering_id FROM dbo.map_lecture_offering WHERE lecture_id=@p0`,
+        [lectureId]
       );
-      if (!r.recordset.length && socket.user.role !== "admin") {
-        return socket.emit("join-denied", {
+      const offeringId = m.recordset[0]?.offering_id || null;
+      if (!offeringId) {
+        socket.emit("join-denied", {
           lecture_id: lectureId,
-          reason: "not assigned",
+          reason: "no mapping",
         });
+        return;
       }
-      const role = r.recordset[0]?.role || socket.user.role;
-      if (role === "student") socket.join(`lec:${lectureId}:students`);
-      if (role === "teacher") socket.join(`lec:${lectureId}:teachers`);
-      socket.join(`lec:${lectureId}:all`);
-      socket.emit("join-ok", { lecture_id: lectureId, role });
+      await joinOfferingRooms(socket, offeringId);
+      // Inform client of the mapped id (optional)
+      socket.emit("mapped-offering", {
+        lecture_id: lectureId,
+        offering_id: offeringId,
+      });
     } catch (e) {
       console.error("join-lecture error:", e);
       socket.emit("join-denied", {
@@ -80,10 +152,17 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("leave-lecture", (lectureId) => {
-    socket.leave(`lec:${lectureId}:students`);
-    socket.leave(`lec:${lectureId}:teachers`);
-    socket.leave(`lec:${lectureId}:all`);
+  socket.on("leave-lecture", async (lectureId) => {
+    try {
+      const m = await query(
+        `SELECT offering_id FROM dbo.map_lecture_offering WHERE lecture_id=@p0`,
+        [lectureId]
+      );
+      const offeringId = m.recordset[0]?.offering_id || null;
+      if (offeringId) leaveOfferingRooms(socket, offeringId);
+    } catch (e) {
+      // ignore
+    }
   });
 });
 

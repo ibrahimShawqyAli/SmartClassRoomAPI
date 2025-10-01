@@ -4,6 +4,8 @@ const bcrypt = require("bcryptjs");
 const { query } = require("../DB/dbConnection");
 const jwt = require("jsonwebtoken");
 const auth = require("../middleware/auth");
+const { buildAssignedSchedule } = require("../utils/buildSchedule");
+const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
 // POST /auth/register
 router.post("/register", async (req, res) => {
   try {
@@ -16,14 +18,16 @@ router.post("/register", async (req, res) => {
         .json({ status: false, error: "Missing required fields" });
     }
 
-    if (!["student", "teacher"].includes(role)) {
-      return res
-        .status(400)
-        .json({ status: false, error: "Role must be student or teacher" });
+    if (!["student", "teacher", "assistant", "admin"].includes(role)) {
+      return res.status(400).json({
+        status: false,
+        error: "Role must be student, teacher, assistant, or admin",
+      });
     }
 
-    // hash default password "123456"
-    const passwordHash = await bcrypt.hash("123456", 10);
+    // hash default password
+    const defaultPw = process.env.DEFAULT_PW || "123456";
+    const passwordHash = await bcrypt.hash(defaultPw, 10);
 
     const sql = `
       INSERT INTO dbo.users
@@ -46,7 +50,7 @@ router.post("/register", async (req, res) => {
     return res.json({
       status: true,
       userId: result.recordset[0].id,
-      message: "User registered successfully (default password = 123456)",
+      message: `User registered successfully (default password = ${defaultPw})`,
     });
   } catch (err) {
     console.error("Register error:", err);
@@ -56,91 +60,85 @@ router.post("/register", async (req, res) => {
   }
 });
 
+// POST /auth/login
+
 router.post("/login", async (req, res) => {
   try {
-    const { email, password, udid } = req.body;
+    const { email, password, udid } = req.body || {};
 
-    if (!email || !password || !udid) {
+    if (!email || !password) {
       return res
         .status(400)
-        .json({ status: false, error: "Missing email, password, or udid" });
+        .json({ status: false, error: "Missing email or password" });
     }
 
     // 1) Find user
-    const userSql = "SELECT * FROM dbo.users WHERE email=@p0";
-    const result = await query(userSql, [email]);
-    if (result.recordset.length === 0) {
+    const userSql = `SELECT * FROM dbo.users WHERE email=@p0`;
+    const ures = await query(userSql, [email]);
+    if (!ures.recordset.length) {
       return res
         .status(401)
         .json({ status: false, error: "Invalid credentials" });
     }
-    const user = result.recordset[0];
+    const user = ures.recordset[0];
 
-    // 2) Verify password
-    const match = await bcrypt.compare(password, user.password_hash);
-    if (!match) {
+    // 2) Verify password (bcrypt hash stored in users.password_hash)
+    const ok = await bcrypt.compare(password, user.password_hash || "");
+    if (!ok) {
       return res
         .status(401)
         .json({ status: false, error: "Invalid credentials" });
     }
 
-    // 3) Check/bind device
-    const devRes = await query(
-      "SELECT udid FROM dbo.devices WHERE user_id=@p0",
-      [user.id]
-    );
-    if (devRes.recordset.length === 0) {
-      await query("INSERT INTO dbo.devices (user_id, udid) VALUES (@p0,@p1)", [
-        user.id,
-        udid,
-      ]);
-    } else if (devRes.recordset[0].udid !== udid) {
-      return res
-        .status(403)
-        .json({ status: false, error: "Device mismatch for this user" });
+    // 3) Device binding policy
+    if (String(user.role).toLowerCase() === "admin") {
+      // Admin: UDID optional; upsert if provided (non-fatal if fails)
+      if (udid) {
+        try {
+          await query(
+            `IF EXISTS (SELECT 1 FROM dbo.devices WHERE user_id=@p0)
+               UPDATE dbo.devices SET udid=@p1 WHERE user_id=@p0
+             ELSE
+               INSERT INTO dbo.devices (user_id, udid) VALUES (@p0, @p1);`,
+            [user.id, udid]
+          );
+        } catch (e) {
+          console.warn("admin device bind warning:", e?.message || e);
+        }
+      }
+    } else {
+      // Non-admins must provide UDID
+      if (!udid) {
+        return res
+          .status(400)
+          .json({ status: false, error: "Missing udid for this account" });
+      }
+      const dev = await query(
+        `SELECT udid FROM dbo.devices WHERE user_id=@p0`,
+        [user.id]
+      );
+      if (!dev.recordset.length) {
+        // first login → bind
+        await query(
+          `INSERT INTO dbo.devices (user_id, udid) VALUES (@p0, @p1)`,
+          [user.id, udid]
+        );
+      } else if (dev.recordset[0].udid !== udid) {
+        return res
+          .status(403)
+          .json({ status: false, error: "Device mismatch for this user" });
+      }
     }
 
-    // 4) Generate JWT (valid 1 year)
-    const token = jwt.sign(
-      { id: user.id, role: user.role },
-      process.env.JWT_SECRET || "supersecret",
-      { expiresIn: "365d" }
-    );
+    // 4) Issue JWT (1 year)
+    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, {
+      expiresIn: "365d",
+    });
 
-    // 5) Fetch assigned lectures for this user (grouped by weekday)
-    const lecSql = `
-      SELECT
-        l.day_of_week,
-        l.id  AS lecture_id,
-        l.name, l.place,
-        l.start_date,
-        CONVERT(VARCHAR(8), l.start_time, 108) AS start_time,  -- "HH:mm:ss"
-        CONVERT(VARCHAR(8), l.end_time,   108) AS end_time,    -- "HH:mm:ss"
-        l.duration_minutes,
-        la.role
-      FROM dbo.lecture_assignments la
-      JOIN dbo.lectures l ON l.id = la.lecture_id
-      WHERE la.user_id = @p0
-      ORDER BY l.day_of_week, l.start_time, l.place, l.id;
-    `;
-    const assigned = await query(lecSql, [user.id]);
+    // 5) Build assigned schedule (works with legacy or new schema)
+    const assigned_schedule = await buildAssignedSchedule(user.id);
 
-    // Build week buckets 0..6
-    const week = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
-    for (const row of assigned.recordset) {
-      week[String(row.day_of_week)].push({
-        lecture_id: row.lecture_id,
-        name: row.name,
-        place: row.place,
-        start_date: row.start_date, // first calendar date
-        start_time: row.start_time, // "HH:mm:ss"
-        end_time: row.end_time, // "HH:mm:ss"
-        duration_minutes: row.duration_minutes,
-        role: row.role, // 'student' or 'teacher'
-      });
-    }
-
-    // 6) Return success + schedule
+    // 6) Respond
     return res.json({
       status: true,
       token,
@@ -154,12 +152,7 @@ router.post("/login", async (req, res) => {
         group_name: user.group_name,
         role: user.role,
       },
-      assigned_schedule: {
-        totals: Object.fromEntries(
-          Object.keys(week).map((k) => [k, week[k].length])
-        ),
-        week,
-      },
+      assigned_schedule,
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -167,12 +160,7 @@ router.post("/login", async (req, res) => {
   }
 });
 
-/**
- * POST /auth/password/reset
- * Body: { email, udid, new_password? }
- * - If new_password is missing: only verify email+udid match -> { status: true } if OK
- * - If new_password present: update user's password -> { status: true, message: "Password updated" }
- */
+// POST /auth/password/reset
 router.post("/password/reset", async (req, res) => {
   try {
     const { email, udid, new_password } = req.body || {};
@@ -204,12 +192,9 @@ router.post("/password/reset", async (req, res) => {
       });
     }
 
-    // 3) If no new_password -> verify-only success
     if (!new_password) {
       return res.json({ status: true, message: "Email/UDID verified" });
     }
-
-    // (Optional) enforce a simple password policy
     if (typeof new_password !== "string" || new_password.length < 6) {
       return res.status(400).json({
         status: false,
@@ -217,7 +202,6 @@ router.post("/password/reset", async (req, res) => {
       });
     }
 
-    // 4) Hash and update password
     const hash = await bcrypt.hash(new_password, 10);
     await query(
       `UPDATE dbo.users
@@ -236,16 +220,17 @@ router.post("/password/reset", async (req, res) => {
       .json({ status: false, error: "Failed to reset password" });
   }
 });
-/**
- * POST /auth/change-password
- * Header: Authorization: Bearer <JWT>
- * Body: { old_password, new_password }
- */
+
+// POST /auth/change-password
 router.post("/change-password", auth, async (req, res) => {
   try {
-    const { old_password, new_password } = req.body || {};
+    console.log("change-password body:", req.body); // <— TEMP
+    console.log("change-password user:", req.user); // <— TEMP
 
-    // basic checks
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({ status: false, error: "Unauthorized" });
+    }
+    const { old_password, new_password } = req.body || {};
     if (!old_password || !new_password) {
       return res.status(400).json({
         status: false,
@@ -259,29 +244,22 @@ router.post("/change-password", auth, async (req, res) => {
       });
     }
 
-    // 1) get current hash for this user (from token)
     const u = await query(
       "SELECT id, password_hash FROM dbo.users WHERE id=@p0",
       [req.user.id]
     );
-    if (u.recordset.length === 0) {
+    if (!u.recordset.length)
       return res.status(404).json({ status: false, error: "User not found" });
-    }
 
-    // 2) verify old password
     const ok = await bcrypt.compare(old_password, u.recordset[0].password_hash);
-    if (!ok) {
+    if (!ok)
       return res
         .status(401)
         .json({ status: false, error: "Old password is incorrect" });
-    }
 
-    // 3) hash new password & update
     const newHash = await bcrypt.hash(new_password, 10);
     await query(
-      `UPDATE dbo.users
-         SET password_hash=@p1, updated_at = SYSUTCDATETIME()
-       WHERE id=@p0`,
+      `UPDATE dbo.users SET password_hash=@p1, updated_at = SYSUTCDATETIME() WHERE id=@p0`,
       [req.user.id, newHash]
     );
 
@@ -293,4 +271,5 @@ router.post("/change-password", auth, async (req, res) => {
       .json({ status: false, error: "Failed to change password" });
   }
 });
+
 module.exports = router;
