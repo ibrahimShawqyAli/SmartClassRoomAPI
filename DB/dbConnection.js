@@ -1,7 +1,14 @@
 // dbConnection.js
 const sql = require("mssql");
 require("dotenv").config();
-
+console.log("ENV CHECK", {
+  SQL_SERVER: process.env.SQL_SERVER,
+  SQL_DB: process.env.SQL_DB,
+  SQL_USER: process.env.SQL_USER,
+  SQL_PASSWORD_SET: !!process.env.SQL_PASSWORD, // don't print the password
+  SQL_ENCRYPT: process.env.SQL_ENCRYPT,
+  SQL_TRUST_CERT: process.env.SQL_TRUST_CERT,
+});
 const config = {
   server: process.env.SQL_SERVER, // e.g., "localhost"
   database: process.env.SQL_DB, // "collegeDB"
