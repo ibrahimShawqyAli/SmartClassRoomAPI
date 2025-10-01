@@ -46,7 +46,7 @@ const upload = multer({
 
 const fr = axios.create({
   baseURL: process.env.FR_BASE_URL || "http://127.0.0.1:5000",
-  timeout: 15000,
+  timeout: 45000,
   httpAgent: new http.Agent({ keepAlive: true, maxSockets: 100 }),
 });
 
