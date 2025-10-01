@@ -7,7 +7,7 @@ const config = {
   database: process.env.SQL_DB, // "collegeDB"
   user: process.env.SQL_USER, // "college_user"
   password: process.env.SQL_PASSWORD, // "Mypass_VisionValley_2025"
-  port: 1433, // <-- TOP LEVEL (not in options)
+  //port: 1433, // <-- TOP LEVEL (not in options)
   options: {
     encrypt: process.env.SQL_ENCRYPT === "true", // usually true
     trustServerCertificate: process.env.SQL_TRUST_CERT === "true", // often true for local dev
