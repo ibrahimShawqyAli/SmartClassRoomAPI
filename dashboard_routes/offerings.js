@@ -169,8 +169,8 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
           CourseName: TYPES.NVarChar,
           RoomId: TYPES.Int,
           DayOfWeek: TYPES.TinyInt,
-          StartTime: TYPES.Time,
-          EndTime: TYPES.Time,
+          StartTime: db.TYPES.NVarChar,
+          EndTime: db.TYPES.NVarChar,
           TeacherId: TYPES.Int,
           TermId: TYPES.Int,
           SectionId: TYPES.Int,
@@ -202,12 +202,10 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
         .json({ status: false, error: "StartTime must be before EndTime" });
     }
     if (num === 50011) {
-      return res
-        .status(400)
-        .json({
-          status: false,
-          error: "Invalid time format; expected HH:MM[:SS]",
-        });
+      return res.status(400).json({
+        status: false,
+        error: "Invalid time format; expected HH:MM[:SS]",
+      });
     }
 
     console.error("schedule offering error:", err);
