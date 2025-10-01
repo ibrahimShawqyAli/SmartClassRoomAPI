@@ -28,6 +28,7 @@ function requireAdmin(req, res, next) {
  *   force_password_change?: boolean   // defaults to true
  * }
  */
+
 router.post("/", auth, requireAdmin, async (req, res) => {
   try {
     const {
@@ -51,7 +52,8 @@ router.post("/", auth, requireAdmin, async (req, res) => {
     }
 
     const allowedRoles = new Set(["student", "teacher", "assistant", "admin"]);
-    if (!allowedRoles.has(String(role).toLowerCase())) {
+    const roleStr = String(role).toLowerCase();
+    if (!allowedRoles.has(roleStr)) {
       return res.status(400).json({ status: false, error: "Invalid role" });
     }
 
@@ -65,12 +67,30 @@ router.post("/", auth, requireAdmin, async (req, res) => {
     const hash = await bcrypt.hash(rawPassword, 10);
     const fpc = force_password_change === false ? 0 : 1; // default true
 
+    // 🔒 Atomic insert that only runs when email doesn't exist
     const sql = `
+      DECLARE @now datetime2 = SYSUTCDATETIME();
+
+      ;WITH newrow AS (
+        SELECT
+          @p0 AS name,
+          @p1 AS email,
+          @p2 AS password_hash,
+          @p3 AS department,
+          @p4 AS [level],
+          @p5 AS [section],
+          @p6 AS group_name,
+          @p7 AS role,
+          @p8 AS force_password_change,
+          @now AS created_at,
+          @now AS updated_at
+      )
       INSERT INTO dbo.users
         (name, email, password_hash, department, [level], [section], group_name, role, force_password_change, created_at, updated_at)
       OUTPUT INSERTED.id
-      VALUES
-        (@p0, @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, SYSUTCDATETIME(), SYSUTCDATETIME());
+      SELECT n.name, n.email, n.password_hash, n.department, n.[level], n.[section], n.group_name, n.role, n.force_password_change, n.created_at, n.updated_at
+      FROM newrow n
+      WHERE NOT EXISTS (SELECT 1 FROM dbo.users u WHERE u.email = @p1);
     `;
 
     const r = await query(sql, [
@@ -81,13 +101,28 @@ router.post("/", auth, requireAdmin, async (req, res) => {
       level || null,
       section || null,
       group_name || null,
-      String(role).toLowerCase(),
+      roleStr,
       fpc,
     ]);
 
+    // If no row inserted, the email already exists → 409
+    if (!r.recordset || r.recordset.length === 0) {
+      // optional: fetch id to include in response
+      const exist = await query("SELECT id FROM dbo.users WHERE email = @p0", [
+        cleanEmail,
+      ]);
+      return res.status(409).json({
+        status: false,
+        error: "Email already exists",
+        existing_user_id: exist.recordset?.[0]?.id ?? null,
+      });
+    }
+
+    const newId = r.recordset[0].id;
+
     return res.json({
       status: true,
-      id: r.recordset[0].id,
+      id: newId,
       message:
         fpc === 1
           ? "User created (default password set; user must change it on first login)"
@@ -95,8 +130,9 @@ router.post("/", auth, requireAdmin, async (req, res) => {
       default_password_used: rawPassword === "123456",
     });
   } catch (e) {
-    // duplicate email, unique constraint
-    if (e.number === 2627 || e.number === 2601) {
+    // Fallback for extremely rare races or other constraint names
+    const code = e?.originalError?.info?.number ?? e?.number;
+    if (code === 2627 || code === 2601) {
       return res
         .status(409)
         .json({ status: false, error: "Email already exists" });

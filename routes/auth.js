@@ -9,57 +9,51 @@ const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
 // POST /auth/register
 router.post("/register", async (req, res) => {
   try {
-    const { name, email, department, level, section, group_name, role } =
-      req.body;
+    const { email, fullName, password, department } = req.body;
 
-    if (!name || !email || !role) {
+    if (!email || !fullName || !password) {
       return res
         .status(400)
-        .json({ status: false, error: "Missing required fields" });
+        .json({ error: "email, fullName, password are required" });
     }
 
-    if (!["student", "teacher", "assistant", "admin"].includes(role)) {
-      return res.status(400).json({
-        status: false,
-        error: "Role must be student, teacher, assistant, or admin",
-      });
-    }
+    const passwordHash = await bcrypt.hash(password, 10);
 
-    // hash default password
-    const defaultPw = process.env.DEFAULT_PW || "123456";
-    const passwordHash = await bcrypt.hash(defaultPw, 10);
+    // proc outputs @NewUserId
+    const result = await db.execProc(
+      "dbo.User_CreateIfNotExists",
+      {
+        Email: email,
+        FullName: fullName,
+        PasswordHash: passwordHash,
+        Department: department ?? null,
+        RoleName: "student",
+        ForcePwChange: false,
+        NewUserId: 0, // output placeholder
+      },
+      {
+        Email: db.TYPES.NVarChar,
+        FullName: db.TYPES.NVarChar,
+        PasswordHash: db.TYPES.NVarChar,
+        Department: db.TYPES.NVarChar,
+        RoleName: db.TYPES.NVarChar,
+        ForcePwChange: db.TYPES.Bit,
+        NewUserId: db.TYPES.Int,
+      }
+    );
 
-    const sql = `
-      INSERT INTO dbo.users
-      (name, email, password_hash, department, [level], [section], group_name, role, force_password_change)
-      OUTPUT INSERTED.id
-      VALUES (@p0, @p1, @p2, @p3, @p4, @p5, @p6, @p7, 1)
-    `;
-
-    const result = await query(sql, [
-      name,
-      email,
-      passwordHash,
-      department || null,
-      level || null,
-      section || null,
-      group_name || null,
-      role,
-    ]);
-
-    return res.json({
-      status: true,
-      userId: result.recordset[0].id,
-      message: `User registered successfully (default password = ${defaultPw})`,
-    });
+    const newId = result.output.NewUserId;
+    return res.status(201).json({ ok: true, userId: newId });
   } catch (err) {
+    // map known duplicate cases to 409
+    const sqlNumber = err?.originalError?.info?.number || err?.number;
+    if (sqlNumber === 50001 || sqlNumber === 2627 || sqlNumber === 2601) {
+      return res.status(409).json({ error: "Email already exists" });
+    }
     console.error("Register error:", err);
-    return res
-      .status(500)
-      .json({ status: false, error: "Registration failed" });
+    return res.status(500).json({ error: "Server error" });
   }
 });
-
 // POST /auth/login
 
 router.post("/login", async (req, res) => {
