@@ -2,7 +2,9 @@
 const express = require("express");
 const router = express.Router();
 const { query } = require("../DB/dbConnection");
+const db = require("../dbConnection");
 const auth = require("../middleware/auth");
+const { TYPES } = db;
 
 function requireAdmin(req, res, next) {
   const role = (req.user?.role || "").toLowerCase();
@@ -27,33 +29,154 @@ async function mustExistIfProvided({ table, id, field = "id", label }) {
   return id;
 }
 
-/**
- * GET /dashboard/offerings
- */
-router.get("/", auth, requireAdmin, async (_req, res) => {
+// POST /api/offerings/schedule
+router.post("/schedule", auth, requireAdmin, async (req, res) => {
   try {
-    const r = await query(`
-      SELECT o.id, c.name AS course_name, o.term_id, o.section_id, o.group_id,
-             o.primary_room_id, o.day_of_week,
-             CONVERT(varchar(8), o.start_time, 108) AS start_time,
-             CONVERT(varchar(8), o.end_time,   108) AS end_time,
-             o.duration_minutes,
-             t.name AS term_name, s.name AS section_name, g.name AS group_name, r.name AS room_name
-      FROM dbo.course_offerings o
-      JOIN dbo.courses c       ON c.id = o.course_id
-      LEFT JOIN dbo.terms t    ON t.id = o.term_id
-      LEFT JOIN dbo.sections s ON s.id = o.section_id
-      LEFT JOIN dbo.groups g   ON g.id = o.group_id
-      LEFT JOIN dbo.rooms  r   ON r.id = o.primary_room_id
-      ORDER BY c.name, o.day_of_week, o.start_time, o.id
-    `);
-    res.json({ status: true, offerings: r.recordset });
-  } catch (e) {
-    console.error("List offerings error:", e);
-    res.status(500).json({ status: false, error: "Server error" });
+    const {
+      courseCode,
+      courseName,
+      roomId,
+      dayOfWeek, // 0..6 (match your DB)
+      startTime, // "HH:MM" or "HH:MM:SS"
+      endTime, // "HH:MM" or "HH:MM:SS"
+      teacherId = null,
+      semester = null,
+    } = req.body || {};
+
+    // Basic validation
+    if (
+      !courseCode ||
+      !courseName ||
+      roomId == null ||
+      dayOfWeek == null ||
+      !startTime ||
+      !endTime
+    ) {
+      return res.status(400).json({
+        error:
+          "courseCode, courseName, roomId, dayOfWeek, startTime, endTime are required",
+      });
+    }
+
+    // Normalize
+    const code = String(courseCode).trim().toUpperCase();
+    const name = String(courseName).trim();
+
+    // Call the proc
+    const result = await db.execProc(
+      "dbo.CourseOffering_CreateIfFree",
+      {
+        CourseCode: code,
+        CourseName: name,
+        RoomId: Number(roomId),
+        DayOfWeek: Number(dayOfWeek),
+        StartTime: startTime, // mssql will accept "HH:MM[:SS]"
+        EndTime: endTime,
+        TeacherId: teacherId === null ? null : Number(teacherId),
+        Semester: semester ?? null,
+        CourseId: 0,
+        OfferingId: 0,
+      },
+      {
+        CourseCode: TYPES.NVarChar,
+        CourseName: TYPES.NVarChar,
+        RoomId: TYPES.Int,
+        DayOfWeek: TYPES.TinyInt,
+        StartTime: TYPES.Time,
+        EndTime: TYPES.Time,
+        TeacherId: TYPES.Int,
+        Semester: TYPES.NVarChar,
+        CourseId: TYPES.Int, // OUTPUT
+        OfferingId: TYPES.Int, // OUTPUT
+      }
+    );
+
+    // The proc already SELECTs the full row; also outputs ids
+    const row = result.recordset?.[0];
+    return res.status(201).json({
+      ok: true,
+      courseId: result.output.CourseId,
+      offeringId: result.output.OfferingId,
+      offering: row || null,
+    });
+  } catch (err) {
+    const num = err?.originalError?.info?.number || err?.number;
+
+    if (num === 50002) {
+      // conflict from proc
+      return res
+        .status(409)
+        .json({ ok: false, error: "Room/time slot is already taken" });
+    }
+    if (num === 50010) {
+      // bad time window
+      return res
+        .status(400)
+        .json({ ok: false, error: "StartTime must be before EndTime" });
+    }
+
+    console.error("schedule offering error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
+/**
+ * GET /dashboard/offerings
+ */
+router.get("/", auth, requireAdmin, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const pageSize = Math.min(
+      Math.max(parseInt(req.query.pageSize || "20", 10), 1),
+      100
+    );
+    const search = (req.query.search || "").trim();
+
+    const where = search ? "WHERE c.code LIKE @p0 OR c.name LIKE @p1" : "";
+
+    // total count
+    const countParams = search ? [`%${search}%`, `%${search}%`] : [];
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM dbo.offerings o
+      JOIN dbo.courses  c ON c.id = o.course_id
+      ${where};
+    `;
+    const total = (await query(countSql, countParams)).recordset[0].total;
+
+    // page slice
+    const offset = (page - 1) * pageSize;
+    const dataParams = search
+      ? [`%${search}%`, `%${search}%`, offset, pageSize]
+      : [offset, pageSize];
+
+    const dataSql = `
+      SELECT 
+        o.id         AS offering_id,
+        c.name       AS course_name,
+        c.code       AS course_code
+      FROM dbo.offerings o
+      JOIN dbo.courses  c ON c.id = o.course_id
+      ${where}
+      ORDER BY o.id DESC
+      OFFSET @p${search ? 2 : 0} ROWS FETCH NEXT @p${search ? 3 : 1} ROWS ONLY;
+    `;
+
+    const rows = (await query(dataSql, dataParams)).recordset || [];
+
+    return res.json({
+      ok: true,
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+      data: rows,
+    });
+  } catch (err) {
+    console.error("List offerings error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
 /**
  * POST /dashboard/offerings
  * Body: {
@@ -199,21 +322,17 @@ router.post("/", auth, requireAdmin, async (req, res) => {
   } catch (e) {
     // friendly FK errors
     if (e.message && e.message.startsWith("invalid_")) {
-      return res
-        .status(400)
-        .json({
-          status: false,
-          error: `Unknown ${e.message.replace("invalid_", "")}`,
-        });
+      return res.status(400).json({
+        status: false,
+        error: `Unknown ${e.message.replace("invalid_", "")}`,
+      });
     }
     if (e.number === 547) {
       // generic SQL FK violation fallback
-      return res
-        .status(400)
-        .json({
-          status: false,
-          error: "Invalid foreign key (term/section/group/room)",
-        });
+      return res.status(400).json({
+        status: false,
+        error: "Invalid foreign key (term/section/group/room)",
+      });
     }
     console.error("Create offering error:", e);
     res.status(500).json({ status: false, error: "Server error" });
@@ -360,12 +479,10 @@ router.patch("/:id", auth, requireAdmin, async (req, res) => {
     return res.json({ status: true, message: "Offering updated" });
   } catch (e) {
     if (e.message && e.message.startsWith("invalid_")) {
-      return res
-        .status(400)
-        .json({
-          status: false,
-          error: `Unknown ${e.message.replace("invalid_", "")}`,
-        });
+      return res.status(400).json({
+        status: false,
+        error: `Unknown ${e.message.replace("invalid_", "")}`,
+      });
     }
     if (e.number === 547)
       return res
