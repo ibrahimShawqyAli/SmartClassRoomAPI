@@ -29,18 +29,68 @@ async function mustExistIfProvided({ table, id, field = "id", label }) {
   return id;
 }
 
-// POST /api/offerings/schedule
+const OFFERINGS_TABLE = "course_offerings"; // or: "offerings"
+
+/* ---------- Helpers ---------- */
+function normalizeTimeToHMS(input) {
+  if (input == null) throw new Error("Invalid time");
+  let s = String(input).trim().toUpperCase();
+
+  // accept "10", "10:30", "10.30", "10-30", "10 AM", "10:30 PM"
+  s = s.replace(/\./g, ":").replace(/-/g, ":");
+
+  const ampmMatch = s.match(/\b(AM|PM)\b/);
+  const ampm = ampmMatch ? ampmMatch[1] : null;
+  s = s.replace(/\b(AM|PM)\b/, "").trim();
+
+  const parts = s
+    .split(":")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  let h = 0,
+    m = 0,
+    sec = 0;
+
+  if (parts.length === 1) {
+    h = parseInt(parts[0], 10);
+  } else if (parts.length === 2) {
+    h = parseInt(parts[0], 10);
+    m = parseInt(parts[1], 10);
+  } else {
+    h = parseInt(parts[0], 10);
+    m = parseInt(parts[1], 10);
+    sec = parseInt(parts[2] || "0", 10);
+  }
+
+  if ([h, m, sec].some(Number.isNaN)) throw new Error("Invalid time");
+  if (ampm === "AM" && h === 12) h = 0;
+  if (ampm === "PM" && h < 12) h += 12;
+
+  if (h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59)
+    throw new Error("Invalid time");
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(h)}:${pad(m)}:${pad(sec)}`;
+}
+
+/* =========================
+   POST /api/offerings/schedule
+   ========================= */
 router.post("/schedule", auth, requireAdmin, async (req, res) => {
   try {
     const {
       courseCode,
       courseName,
       roomId,
-      dayOfWeek, // 0..6 (match your DB)
-      startTime, // "HH:MM" or "HH:MM:SS"
-      endTime, // "HH:MM" or "HH:MM:SS"
+      dayOfWeek, // 0..6 (your convention)
+      startTime, // "HH:MM" | "HH:MM:SS" | accepts AM/PM via helper
+      endTime, // same
       teacherId = null,
+      // If you're using dbo.offerings: semester
+      // If you're using dbo.course_offerings: termId/sectionId/groupId
       semester = null,
+      termId = null,
+      sectionId = null,
+      groupId = null,
     } = req.body || {};
 
     // Basic validation
@@ -53,6 +103,7 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
       !endTime
     ) {
       return res.status(400).json({
+        status: false,
         error:
           "courseCode, courseName, roomId, dayOfWeek, startTime, endTime are required",
       });
@@ -61,58 +112,102 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
     // Normalize
     const code = String(courseCode).trim().toUpperCase();
     const name = String(courseName).trim();
+    const startHMS = normalizeTimeToHMS(startTime);
+    const endHMS = normalizeTimeToHMS(endTime);
 
-    // Call the proc
-    const result = await db.execProc(
-      "dbo.CourseOffering_CreateIfFree",
-      {
-        CourseCode: code,
-        CourseName: name,
-        RoomId: Number(roomId),
-        DayOfWeek: Number(dayOfWeek),
-        StartTime: startTime, // mssql will accept "HH:MM[:SS]"
-        EndTime: endTime,
-        TeacherId: teacherId === null ? null : Number(teacherId),
-        Semester: semester ?? null,
-        CourseId: 0,
-        OfferingId: 0,
-      },
-      {
-        CourseCode: TYPES.NVarChar,
-        CourseName: TYPES.NVarChar,
-        RoomId: TYPES.Int,
-        DayOfWeek: TYPES.TinyInt,
-        StartTime: TYPES.Time,
-        EndTime: TYPES.Time,
-        TeacherId: TYPES.Int,
-        Semester: TYPES.NVarChar,
-        CourseId: TYPES.Int, // OUTPUT
-        OfferingId: TYPES.Int, // OUTPUT
-      }
-    );
+    // Call the correct proc depending on your schema
+    let result;
+    if (OFFERINGS_TABLE === "offerings") {
+      // Proc signature with Semester (new table)
+      result = await db.execProc(
+        "dbo.CourseOffering_CreateIfFree",
+        {
+          CourseCode: code,
+          CourseName: name,
+          RoomId: Number(roomId),
+          DayOfWeek: Number(dayOfWeek),
+          StartTime: startHMS, // "HH:mm:ss"
+          EndTime: endHMS,
+          TeacherId: teacherId == null ? null : Number(teacherId),
+          Semester: semester ?? null,
+          CourseId: 0,
+          OfferingId: 0,
+        },
+        {
+          CourseCode: TYPES.NVarChar,
+          CourseName: TYPES.NVarChar,
+          RoomId: TYPES.Int,
+          DayOfWeek: TYPES.TinyInt,
+          StartTime: TYPES.Time,
+          EndTime: TYPES.Time,
+          TeacherId: TYPES.Int,
+          Semester: TYPES.NVarChar,
+          CourseId: TYPES.Int,
+          OfferingId: TYPES.Int,
+        }
+      );
+    } else {
+      // Proc signature with Term/Section/Group (old table course_offerings)
+      result = await db.execProc(
+        "dbo.CourseOffering_CreateIfFree",
+        {
+          CourseCode: code,
+          CourseName: name,
+          RoomId: Number(roomId),
+          DayOfWeek: Number(dayOfWeek),
+          StartTime: startHMS,
+          EndTime: endHMS,
+          TeacherId: teacherId == null ? null : Number(teacherId),
+          TermId: termId == null ? null : Number(termId),
+          SectionId: sectionId == null ? null : Number(sectionId),
+          GroupId: groupId == null ? null : Number(groupId),
+          CourseId: 0,
+          OfferingId: 0,
+        },
+        {
+          CourseCode: TYPES.NVarChar,
+          CourseName: TYPES.NVarChar,
+          RoomId: TYPES.Int,
+          DayOfWeek: TYPES.TinyInt,
+          StartTime: TYPES.Time,
+          EndTime: TYPES.Time,
+          TeacherId: TYPES.Int,
+          TermId: TYPES.Int,
+          SectionId: TYPES.Int,
+          GroupId: TYPES.Int,
+          CourseId: TYPES.Int,
+          OfferingId: TYPES.Int,
+        }
+      );
+    }
 
-    // The proc already SELECTs the full row; also outputs ids
-    const row = result.recordset?.[0];
+    const row = result.recordset?.[0] || null;
     return res.status(201).json({
       status: true,
       courseId: result.output.CourseId,
       offeringId: result.output.OfferingId,
-      offering: row || null,
+      offering: row,
     });
   } catch (err) {
     const num = err?.originalError?.info?.number || err?.number;
 
     if (num === 50002) {
-      // conflict from proc
       return res
         .status(409)
         .json({ status: false, error: "Room/time slot is already taken" });
     }
     if (num === 50010) {
-      // bad time window
       return res
         .status(400)
         .json({ status: false, error: "StartTime must be before EndTime" });
+    }
+    if (num === 50011) {
+      return res
+        .status(400)
+        .json({
+          status: false,
+          error: "Invalid time format; expected HH:MM[:SS]",
+        });
     }
 
     console.error("schedule offering error:", err);
