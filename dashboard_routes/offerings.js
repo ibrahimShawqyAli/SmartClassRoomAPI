@@ -2,7 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const { query } = require("../DB/dbConnection");
-const db = require("../dbConnection");
+const db = require("../DB/dbConnection");
 const auth = require("../middleware/auth");
 const { TYPES } = db;
 
