@@ -154,7 +154,16 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
     });
   } catch (err) {
     const num = err?.originalError?.info?.number || err?.number;
-
+    if (num === 50020)
+      return res.status(400).json({ status: false, error: "Room not found" });
+    if (num === 50021)
+      return res.status(400).json({ status: false, error: "Term not found" });
+    if (num === 50022)
+      return res
+        .status(400)
+        .json({ status: false, error: "Section not found" });
+    if (num === 50023)
+      return res.status(400).json({ status: false, error: "Group not found" });
     if (num === 50002) {
       return res
         .status(409)
@@ -166,12 +175,10 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
         .json({ status: false, error: "StartTime must be before EndTime" });
     }
     if (num === 50011) {
-      return res
-        .status(400)
-        .json({
-          status: false,
-          error: "Invalid time format; expected HH:MM[:SS]",
-        });
+      return res.status(400).json({
+        status: false,
+        error: "Invalid time format; expected HH:MM[:SS]",
+      });
     }
 
     console.error("schedule offering error:", err);
