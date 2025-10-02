@@ -21,7 +21,7 @@ async function one(sql, params = []) {
 
 // validate FK if value provided (allows NULL)
 async function mustExistIfProvided({ table, id, field = "id", label }) {
-  if (id === undefined || id === null) return null; // ok to be null
+  if (id === undefined || id === null) return null; // status to be null
   const row = await one(`SELECT ${field} FROM ${table} WHERE ${field}=@p0`, [
     id,
   ]);
@@ -80,11 +80,12 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
     const {
       courseCode,
       courseName,
+      departmentId = null,
+      creditHours = null,
       roomId,
       dayOfWeek, // 0..6
       startTime,
       endTime,
-      teacherId = null, // optional
       termId = null,
       sectionId = null,
       groupId = null,
@@ -118,11 +119,12 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
       {
         CourseCode: code,
         CourseName: name,
+        DepartmentId: departmentId == null ? null : Number(departmentId), // 👈
+        CreditHours: creditHours == null ? null : Number(creditHours), // 👈
         RoomId: Number(roomId),
         DayOfWeek: Number(dayOfWeek),
         StartTime: startHMS,
         EndTime: endHMS,
-        TeacherId: teacherId == null ? null : Number(teacherId),
         TermId: termId == null ? null : Number(termId),
         SectionId: sectionId == null ? null : Number(sectionId),
         GroupId: groupId == null ? null : Number(groupId),
@@ -130,22 +132,43 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
         OfferingId: 0,
       },
       {
-        CourseCode: TYPES.NVarChar,
-        CourseName: TYPES.NVarChar,
-        RoomId: TYPES.Int,
-        DayOfWeek: TYPES.TinyInt,
-        StartTime: TYPES.NVarChar, // send as text
-        EndTime: TYPES.NVarChar,
-        TeacherId: TYPES.Int,
-        TermId: TYPES.Int,
-        SectionId: TYPES.Int,
-        GroupId: TYPES.Int,
-        CourseId: TYPES.Int,
-        OfferingId: TYPES.Int,
+        CourseCode: db.TYPES.NVarChar,
+        CourseName: db.TYPES.NVarChar,
+        DepartmentId: db.TYPES.Int,
+        CreditHours: db.TYPES.Int,
+        RoomId: db.TYPES.Int,
+        DayOfWeek: db.TYPES.TinyInt,
+        StartTime: db.TYPES.NVarChar,
+        EndTime: db.TYPES.NVarChar,
+        TermId: db.TYPES.Int,
+        SectionId: db.TYPES.Int,
+        GroupId: db.TYPES.Int,
+        CourseId: db.TYPES.Int,
+        OfferingId: db.TYPES.Int,
       }
     );
 
+    // Helper to format time
+    const toHHMM = (v) => {
+      if (v == null) return v;
+      const s = String(v);
+      if (/^\d{2}:\d{2}(:\d{2})?$/.test(s)) return s.slice(0, 5);
+      try {
+        return new Date(v).toISOString().substring(11, 16);
+      } catch {
+        return s;
+      }
+    };
+
+    // Massage row before response
     const row = result.recordset?.[0] || null;
+    if (row) {
+      row.start_time = toHHMM(row.start_time);
+      row.end_time = toHHMM(row.end_time);
+      row.department_id = departmentId;
+      row.credit_hours = creditHours;
+    }
+
     return res.status(201).json({
       status: true,
       courseId: result.output.CourseId,
@@ -154,6 +177,7 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
     });
   } catch (err) {
     const num = err?.originalError?.info?.number || err?.number;
+
     if (num === 50020)
       return res.status(400).json({ status: false, error: "Room not found" });
     if (num === 50021)
@@ -164,6 +188,10 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
         .json({ status: false, error: "Section not found" });
     if (num === 50023)
       return res.status(400).json({ status: false, error: "Group not found" });
+    if (num === 50024)
+      return res
+        .status(400)
+        .json({ status: false, error: "Course could not be created/resolved" });
     if (num === 50002) {
       return res
         .status(409)
@@ -216,11 +244,31 @@ router.get("/", auth, requireAdmin, async (req, res) => {
 
     const dataSql = `
       SELECT 
-        o.id           AS offering_id,
-        c.name         AS course_name,
-        c.code         AS course_code
+        o.id                     AS offering_id,
+        c.id                     AS course_id,
+        c.code                   AS course_code,
+        c.name                   AS course_name,
+        c.department_id,
+        c.credit_hours,
+        o.primary_room_id        AS room_id,
+        r.name                   AS room_name,
+        o.day_of_week,
+        CONVERT(varchar(5), o.start_time, 108) AS start_time, -- HH:MM
+        CONVERT(varchar(5), o.end_time, 108)   AS end_time,
+        o.duration_minutes,
+        o.term_id,
+        t.name                   AS term_name,
+        o.section_id,
+        s.name                   AS section_name,
+        o.group_id,
+        g.name                   AS group_name,
+        o.created_at
       FROM dbo.${OFFERINGS_TABLE} o
-      JOIN dbo.courses c ON c.id = o.course_id
+      JOIN dbo.courses c    ON c.id = o.course_id
+      LEFT JOIN dbo.rooms r ON r.id = o.primary_room_id
+      LEFT JOIN dbo.terms t ON t.id = o.term_id
+      LEFT JOIN dbo.sections s ON s.id = o.section_id
+      LEFT JOIN dbo.[groups] g ON g.id = o.group_id
       ${where}
       ORDER BY o.id DESC
       OFFSET @p${search ? 2 : 0} ROWS FETCH NEXT @p${search ? 3 : 1} ROWS ONLY;
@@ -228,16 +276,16 @@ router.get("/", auth, requireAdmin, async (req, res) => {
     const rows = (await query(dataSql, dataParams)).recordset || [];
 
     return res.json({
-      ok: true,
+      status: true,
       page,
       pageSize,
       total,
-      totalPages: Math.ceil(total / pageSize),
+      pages: Math.ceil(total / pageSize),
       data: rows,
     });
   } catch (err) {
     console.error("List offerings error:", err);
-    return res.status(500).json({ ok: false, error: "Server error" });
+    return res.status(500).json({ status: false, error: "Server error" });
   }
 });
 
