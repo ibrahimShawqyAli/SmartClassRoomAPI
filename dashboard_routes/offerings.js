@@ -31,12 +31,11 @@ async function mustExistIfProvided({ table, id, field = "id", label }) {
 
 const OFFERINGS_TABLE = "course_offerings"; // or: "offerings"
 
-/* ---------- Helpers ---------- */
 function normalizeTimeToHMS(input) {
   if (input == null) throw new Error("Invalid time");
   let s = String(input).trim().toUpperCase();
 
-  // accept "10", "10:30", "10.30", "10-30", "10 AM", "10:30 PM"
+  // support "10", "10:30", "10.30", "10-30", "10 AM", "10:30 PM"
   s = s.replace(/\./g, ":").replace(/-/g, ":");
 
   const ampmMatch = s.match(/\b(AM|PM)\b/);
@@ -45,7 +44,7 @@ function normalizeTimeToHMS(input) {
 
   const parts = s
     .split(":")
-    .map((x) => x.trim())
+    .map((p) => p.trim())
     .filter(Boolean);
   let h = 0,
     m = 0,
@@ -65,9 +64,10 @@ function normalizeTimeToHMS(input) {
   if ([h, m, sec].some(Number.isNaN)) throw new Error("Invalid time");
   if (ampm === "AM" && h === 12) h = 0;
   if (ampm === "PM" && h < 12) h += 12;
-
-  if (h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59)
+  if (h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59) {
     throw new Error("Invalid time");
+  }
+
   const pad = (n) => String(n).padStart(2, "0");
   return `${pad(h)}:${pad(m)}:${pad(sec)}`;
 }
@@ -82,18 +82,19 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
       courseName,
       roomId,
       dayOfWeek, // 0..6 (your convention)
-      startTime, // "HH:MM" | "HH:MM:SS" | accepts AM/PM via helper
-      endTime, // same
+      startTime, // string – supports HH:MM, HH:MM:SS, AM/PM
+      endTime,
       teacherId = null,
-      // If you're using dbo.offerings: semester
-      // If you're using dbo.course_offerings: termId/sectionId/groupId
+
+      // If OFFERINGS_TABLE === "offerings": use semester (string)
+      // If OFFERINGS_TABLE === "course_offerings": use term/section/group (ints)
       semester = null,
       termId = null,
       sectionId = null,
       groupId = null,
     } = req.body || {};
 
-    // Basic validation
+    // basic validation
     if (
       !courseCode ||
       !courseName ||
@@ -109,14 +110,14 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
       });
     }
 
-    // Normalize
+    // normalize
     const code = String(courseCode).trim().toUpperCase();
     const name = String(courseName).trim();
     const startHMS = normalizeTimeToHMS(startTime);
     const endHMS = normalizeTimeToHMS(endTime);
 
-    // Call the correct proc depending on your schema
     let result;
+
     if (OFFERINGS_TABLE === "offerings") {
       // Proc signature with Semester (new table)
       result = await db.execProc(
@@ -126,8 +127,8 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
           CourseName: name,
           RoomId: Number(roomId),
           DayOfWeek: Number(dayOfWeek),
-          StartTime: startHMS, // "HH:mm:ss"
-          EndTime: endHMS,
+          StartTime: startHMS, // send as text
+          EndTime: endHMS, // send as text
           TeacherId: teacherId == null ? null : Number(teacherId),
           Semester: semester ?? null,
           CourseId: 0,
@@ -138,8 +139,8 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
           CourseName: TYPES.NVarChar,
           RoomId: TYPES.Int,
           DayOfWeek: TYPES.TinyInt,
-          StartTime: TYPES.Time,
-          EndTime: TYPES.Time,
+          StartTime: TYPES.NVarChar, // ⬅ avoid TIME validation
+          EndTime: TYPES.NVarChar,
           TeacherId: TYPES.Int,
           Semester: TYPES.NVarChar,
           CourseId: TYPES.Int,
@@ -169,8 +170,8 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
           CourseName: TYPES.NVarChar,
           RoomId: TYPES.Int,
           DayOfWeek: TYPES.TinyInt,
-          StartTime: db.TYPES.NVarChar,
-          EndTime: db.TYPES.NVarChar,
+          StartTime: TYPES.NVarChar, // ⬅ avoid TIME validation
+          EndTime: TYPES.NVarChar,
           TeacherId: TYPES.Int,
           TermId: TYPES.Int,
           SectionId: TYPES.Int,
@@ -210,6 +211,61 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
 
     console.error("schedule offering error:", err);
     return res.status(500).json({ status: false, error: "Server error" });
+  }
+});
+
+/* =========================
+   GET /api/offerings (paginated, minimal fields)
+   ========================= */
+router.get("/", auth, requireAdmin, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const pageSize = Math.min(
+      Math.max(parseInt(req.query.pageSize || "20", 10), 1),
+      100
+    );
+    const search = (req.query.search || "").trim();
+
+    const where = search ? "WHERE c.code LIKE @p0 OR c.name LIKE @p1" : "";
+    const countParams = search ? [`%${search}%`, `%${search}%`] : [];
+
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM dbo.${OFFERINGS_TABLE} o
+      JOIN dbo.courses c ON c.id = o.course_id
+      ${where};
+    `;
+    const total = (await query(countSql, countParams)).recordset[0].total;
+
+    const offset = (page - 1) * pageSize;
+    const dataParams = search
+      ? [`%${search}%`, `%${search}%`, offset, pageSize]
+      : [offset, pageSize];
+
+    const dataSql = `
+      SELECT 
+        o.id           AS offering_id,
+        c.name         AS course_name,
+        c.code         AS course_code
+      FROM dbo.${OFFERINGS_TABLE} o
+      JOIN dbo.courses c ON c.id = o.course_id
+      ${where}
+      ORDER BY o.id DESC
+      OFFSET @p${search ? 2 : 0} ROWS FETCH NEXT @p${search ? 3 : 1} ROWS ONLY;
+    `;
+    const rows = (await query(dataSql, dataParams)).recordset || [];
+
+    return res.json({
+      ok: true,
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+      data: rows,
+    });
+  } catch (err) {
+    console.error("List offerings error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
