@@ -29,13 +29,14 @@ async function mustExistIfProvided({ table, id, field = "id", label }) {
   return id;
 }
 
-const OFFERINGS_TABLE = "course_offerings"; // or: "offerings"
+const OFFERINGS_TABLE = "course_offerings";
 
+/* ----------------- Helper: normalize time ----------------- */
 function normalizeTimeToHMS(input) {
   if (input == null) throw new Error("Invalid time");
   let s = String(input).trim().toUpperCase();
 
-  // support "10", "10:30", "10.30", "10-30", "10 AM", "10:30 PM"
+  // accept "10", "10:30", "10 AM", "10.30", "10-30"
   s = s.replace(/\./g, ":").replace(/-/g, ":");
 
   const ampmMatch = s.match(/\b(AM|PM)\b/);
@@ -44,7 +45,7 @@ function normalizeTimeToHMS(input) {
 
   const parts = s
     .split(":")
-    .map((p) => p.trim())
+    .map((x) => x.trim())
     .filter(Boolean);
   let h = 0,
     m = 0,
@@ -64,37 +65,32 @@ function normalizeTimeToHMS(input) {
   if ([h, m, sec].some(Number.isNaN)) throw new Error("Invalid time");
   if (ampm === "AM" && h === 12) h = 0;
   if (ampm === "PM" && h < 12) h += 12;
-  if (h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59) {
+  if (h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59)
     throw new Error("Invalid time");
-  }
 
   const pad = (n) => String(n).padStart(2, "0");
   return `${pad(h)}:${pad(m)}:${pad(sec)}`;
 }
 
-/* =========================
+/* ============================================================
    POST /api/offerings/schedule
-   ========================= */
+   ============================================================ */
 router.post("/schedule", auth, requireAdmin, async (req, res) => {
   try {
     const {
       courseCode,
       courseName,
       roomId,
-      dayOfWeek, // 0..6 (your convention)
-      startTime, // string – supports HH:MM, HH:MM:SS, AM/PM
+      dayOfWeek, // 0..6
+      startTime,
       endTime,
-      teacherId = null,
-
-      // If OFFERINGS_TABLE === "offerings": use semester (string)
-      // If OFFERINGS_TABLE === "course_offerings": use term/section/group (ints)
-      semester = null,
+      teacherId = null, // optional
       termId = null,
       sectionId = null,
       groupId = null,
     } = req.body || {};
 
-    // basic validation
+    // Validation
     if (
       !courseCode ||
       !courseName ||
@@ -110,77 +106,44 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
       });
     }
 
-    // normalize
+    // Normalize
     const code = String(courseCode).trim().toUpperCase();
     const name = String(courseName).trim();
     const startHMS = normalizeTimeToHMS(startTime);
     const endHMS = normalizeTimeToHMS(endTime);
 
-    let result;
-
-    if (OFFERINGS_TABLE === "offerings") {
-      // Proc signature with Semester (new table)
-      result = await db.execProc(
-        "dbo.CourseOffering_CreateIfFree",
-        {
-          CourseCode: code,
-          CourseName: name,
-          RoomId: Number(roomId),
-          DayOfWeek: Number(dayOfWeek),
-          StartTime: startHMS, // send as text
-          EndTime: endHMS, // send as text
-          TeacherId: teacherId == null ? null : Number(teacherId),
-          Semester: semester ?? null,
-          CourseId: 0,
-          OfferingId: 0,
-        },
-        {
-          CourseCode: TYPES.NVarChar,
-          CourseName: TYPES.NVarChar,
-          RoomId: TYPES.Int,
-          DayOfWeek: TYPES.TinyInt,
-          StartTime: TYPES.NVarChar, // ⬅ avoid TIME validation
-          EndTime: TYPES.NVarChar,
-          TeacherId: TYPES.Int,
-          Semester: TYPES.NVarChar,
-          CourseId: TYPES.Int,
-          OfferingId: TYPES.Int,
-        }
-      );
-    } else {
-      // Proc signature with Term/Section/Group (old table course_offerings)
-      result = await db.execProc(
-        "dbo.CourseOffering_CreateIfFree",
-        {
-          CourseCode: code,
-          CourseName: name,
-          RoomId: Number(roomId),
-          DayOfWeek: Number(dayOfWeek),
-          StartTime: startHMS,
-          EndTime: endHMS,
-          TeacherId: teacherId == null ? null : Number(teacherId),
-          TermId: termId == null ? null : Number(termId),
-          SectionId: sectionId == null ? null : Number(sectionId),
-          GroupId: groupId == null ? null : Number(groupId),
-          CourseId: 0,
-          OfferingId: 0,
-        },
-        {
-          CourseCode: TYPES.NVarChar,
-          CourseName: TYPES.NVarChar,
-          RoomId: TYPES.Int,
-          DayOfWeek: TYPES.TinyInt,
-          StartTime: TYPES.NVarChar, // ⬅ avoid TIME validation
-          EndTime: TYPES.NVarChar,
-          TeacherId: TYPES.Int,
-          TermId: TYPES.Int,
-          SectionId: TYPES.Int,
-          GroupId: TYPES.Int,
-          CourseId: TYPES.Int,
-          OfferingId: TYPES.Int,
-        }
-      );
-    }
+    // Call the stored procedure
+    const result = await db.execProc(
+      "dbo.CourseOffering_CreateIfFree",
+      {
+        CourseCode: code,
+        CourseName: name,
+        RoomId: Number(roomId),
+        DayOfWeek: Number(dayOfWeek),
+        StartTime: startHMS,
+        EndTime: endHMS,
+        TeacherId: teacherId == null ? null : Number(teacherId),
+        TermId: termId == null ? null : Number(termId),
+        SectionId: sectionId == null ? null : Number(sectionId),
+        GroupId: groupId == null ? null : Number(groupId),
+        CourseId: 0,
+        OfferingId: 0,
+      },
+      {
+        CourseCode: TYPES.NVarChar,
+        CourseName: TYPES.NVarChar,
+        RoomId: TYPES.Int,
+        DayOfWeek: TYPES.TinyInt,
+        StartTime: TYPES.NVarChar, // send as text
+        EndTime: TYPES.NVarChar,
+        TeacherId: TYPES.Int,
+        TermId: TYPES.Int,
+        SectionId: TYPES.Int,
+        GroupId: TYPES.Int,
+        CourseId: TYPES.Int,
+        OfferingId: TYPES.Int,
+      }
+    );
 
     const row = result.recordset?.[0] || null;
     return res.status(201).json({
@@ -203,10 +166,12 @@ router.post("/schedule", auth, requireAdmin, async (req, res) => {
         .json({ status: false, error: "StartTime must be before EndTime" });
     }
     if (num === 50011) {
-      return res.status(400).json({
-        status: false,
-        error: "Invalid time format; expected HH:MM[:SS]",
-      });
+      return res
+        .status(400)
+        .json({
+          status: false,
+          error: "Invalid time format; expected HH:MM[:SS]",
+        });
     }
 
     console.error("schedule offering error:", err);
