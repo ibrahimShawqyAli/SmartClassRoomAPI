@@ -61,12 +61,10 @@ router.post("/", async (req, res) => {
     });
   } catch (err) {
     if (err && (err.number === 2627 || err.number === 2601)) {
-      return res
-        .status(409)
-        .json({
-          status: false,
-          error: "User already assigned to this offering",
-        });
+      return res.status(409).json({
+        status: false,
+        error: "User already assigned to this offering",
+      });
     }
     if (err && err.number === 547) {
       return res
@@ -110,7 +108,7 @@ router.post("/my-week", async (req, res) => {
       JOIN dbo.course_offerings o ON o.id = a.offering_id
       JOIN dbo.courses c          ON c.id = o.course_id
       LEFT JOIN dbo.departments d ON d.id = c.department_id
-      LEFT JOIN dbo.rooms r       ON r.id = o.room_id
+      LEFT JOIN dbo.rooms r       ON r.id = o.primary_room_id
       WHERE a.user_id = @p0
       ORDER BY o.day_of_week,
                o.start_time,
