@@ -4,19 +4,17 @@ const router = express.Router();
 const { query } = require("../DB/dbConnection");
 const auth = require("../middleware/auth");
 
-// small helper to read user, compatible with your middleware
 function getReqUser(req) {
   const src = req.auth || req.user || {};
   return { id: src.id, role: (src.role || "").toLowerCase() };
 }
 
-// GET /weekly-reports  (mounted as /weekly-reports in index.js)
+// GET /weekly-reports
 router.get("/", auth, async (req, res) => {
   try {
     const { id: userId, role } = getReqUser(req);
-    const todayISO = new Date().toISOString().slice(0, 10);
 
-    // 1) Which offerings is this user assigned to?
+    // 1) Get user's assigned offerings
     const assignedSql = `
       SELECT oa.offering_id, oa.role AS assign_role, c.name AS course_name
       FROM dbo.offering_assignments oa
@@ -25,56 +23,44 @@ router.get("/", auth, async (req, res) => {
       WHERE oa.user_id = @p0
     `;
     const assigned = await query(assignedSql, [userId]);
-
-    if (!assigned.recordset.length) {
-      // not assigned to anything -> empty summary
+    if (!assigned.recordset.length)
       return res.json({ status: true, summary: [] });
-    }
 
-    // Filter by the user's role
+    // Filter according to user’s own role
     const filtered = assigned.recordset.filter((row) => {
       if (role === "student") return row.assign_role === "student";
       if (role === "teacher") return row.assign_role === "teacher";
-      return true; // admin: keep all the user’s assigned offerings
+      return true; // admin: include all
     });
-    if (!filtered.length) {
-      return res.json({ status: true, summary: [] });
-    }
+    if (!filtered.length) return res.json({ status: true, summary: [] });
 
     const offeringIds = filtered.map((r) => r.offering_id);
-
-    // Helper to build a parameterized IN list: @p0,@p1,@p2...
     const makeInList = (count, startIndex = 0) =>
       Array.from({ length: count }, (_, i) => `@p${startIndex + i}`).join(",");
 
-    // 2) Count "held" sessions (planned on/before today) per offering
-    const inList = makeInList(offeringIds.length, 0);
+    const inList = makeInList(offeringIds.length);
+
+    // === "Held" sessions equivalent: count all course_offerings ===
     const heldSql = `
-      SELECT offering_id, COUNT(*) AS held_sessions
-      FROM dbo.course_sessions
-      WHERE offering_id IN (${inList})
-        AND CAST(planned_start_utc AS DATE) <= @p${offeringIds.length}
-      GROUP BY offering_id
+      SELECT id AS offering_id, 1 AS held_sessions
+      FROM dbo.course_offerings
+      WHERE id IN (${inList})
     `;
-    const heldRes = await query(heldSql, [...offeringIds, todayISO]);
+    const heldRes = await query(heldSql, offeringIds);
     const heldMap = new Map();
-    heldRes.recordset.forEach((r) =>
-      heldMap.set(r.offering_id, Number(r.held_sessions) || 0)
-    );
+    heldRes.recordset.forEach((r) => heldMap.set(r.offering_id, 1));
 
     // === Student Mode ===
     if (role === "student") {
       const presSql = `
-        SELECT s.offering_id, COUNT(DISTINCT ar.session_id) AS present
+        SELECT ar.offering_id, COUNT(*) AS present
         FROM dbo.attendance_records ar
-        JOIN dbo.course_sessions s ON s.id = ar.session_id
         WHERE ar.user_id = @p0
           AND ar.check_in_at IS NOT NULL
-          AND s.offering_id IN (${inList})
-          AND CAST(s.planned_start_utc AS DATE) <= @p${offeringIds.length + 1}
-        GROUP BY s.offering_id
+          AND ar.offering_id IN (${inList})
+        GROUP BY ar.offering_id
       `;
-      const presRes = await query(presSql, [userId, ...offeringIds, todayISO]);
+      const presRes = await query(presSql, [userId, ...offeringIds]);
       const presentMap = new Map();
       presRes.recordset.forEach((r) =>
         presentMap.set(r.offering_id, Number(r.present) || 0)
@@ -82,7 +68,7 @@ router.get("/", auth, async (req, res) => {
 
       const summary = filtered.map((row) => {
         const offId = row.offering_id;
-        const held = heldMap.get(offId) ?? 0;
+        const held = heldMap.get(offId) ?? 1;
         const attend = presentMap.get(offId) ?? 0;
         const absence = Math.max(held - attend, 0);
         return {
@@ -96,45 +82,20 @@ router.get("/", auth, async (req, res) => {
       return res.json({ status: true, summary });
     }
 
-    // === Teacher/Admin Mode ===
-    // Teachers -> only sessions they started
-    // Admins   -> all sessions (any starter)
-    let teacherSql;
-    let teacherParams;
-
-    if (role === "teacher") {
-      teacherSql = `
-        SELECT offering_id, COUNT(*) AS started_sessions
-        FROM dbo.course_sessions
-        WHERE offering_id IN (${inList})
-          AND CAST(planned_start_utc AS DATE) <= @p${offeringIds.length}
-          AND status IN ('started','ended')
-          AND started_by = @p${offeringIds.length + 1}
-        GROUP BY offering_id
-      `;
-      teacherParams = [...offeringIds, todayISO, userId];
-    } else {
-      // admin
-      teacherSql = `
-        SELECT offering_id, COUNT(*) AS started_sessions
-        FROM dbo.course_sessions
-        WHERE offering_id IN (${inList})
-          AND CAST(planned_start_utc AS DATE) <= @p${offeringIds.length}
-          AND status IN ('started','ended')
-        GROUP BY offering_id
-      `;
-      teacherParams = [...offeringIds, todayISO];
-    }
-
-    const teacherRes = await query(teacherSql, teacherParams);
+    // === Teacher / Admin Mode ===
+    // For new schema: each offering can be considered one session
+    const teachSql = `
+      SELECT id AS offering_id, 1 AS started_sessions
+      FROM dbo.course_offerings
+      WHERE id IN (${inList})
+    `;
+    const teachRes = await query(teachSql, offeringIds);
     const startedMap = new Map();
-    teacherRes.recordset.forEach((r) =>
-      startedMap.set(r.offering_id, Number(r.started_sessions) || 0)
-    );
+    teachRes.recordset.forEach((r) => startedMap.set(r.offering_id, 1));
 
     const summary = filtered.map((row) => {
       const offId = row.offering_id;
-      const held = heldMap.get(offId) ?? 0;
+      const held = heldMap.get(offId) ?? 1;
       const attend = startedMap.get(offId) ?? 0;
       const absence = Math.max(held - attend, 0);
       return {

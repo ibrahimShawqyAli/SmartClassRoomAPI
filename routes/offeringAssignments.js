@@ -94,34 +94,38 @@ router.post("/my-week", async (req, res) => {
         .json({ status: false, error: "user_id is required" });
     }
 
-    // Pull all assignments for the user
+    // If sessions are now stored in course_offerings, remove the join with course_sessions
     const sql = `
       SELECT
-        cs.day_of_week,
-        o.id           AS offering_id,
-        c.name         AS subject,
-        r.name         AS room,
-        CONVERT(VARCHAR(8), cs.start_time, 108) AS start_time, -- "HH:mm:ss"
-        CONVERT(VARCHAR(8), cs.end_time,   108) AS end_time,   -- "HH:mm:ss"
-        cs.duration_minutes,
+        o.day_of_week,
+        o.id             AS offering_id,
+        c.name           AS course_name,
+        c.code           AS course_code,
+        r.name           AS room_name,
+        d.name           AS department_name,
+        CONVERT(VARCHAR(5), o.start_time, 108) AS start_time, -- HH:mm
+        CONVERT(VARCHAR(5), o.end_time,   108) AS end_time,   -- HH:mm
+        o.duration_minutes,
         a.role
       FROM dbo.offering_assignments a
       JOIN dbo.course_offerings o ON o.id = a.offering_id
       JOIN dbo.courses c ON c.id = o.course_id
-      JOIN dbo.course_sessions cs ON cs.offering_id = o.id
-      LEFT JOIN dbo.rooms r ON r.id = cs.room_id
+      LEFT JOIN dbo.departments d ON d.id = c.department_id
+      LEFT JOIN dbo.rooms r ON r.id = o.room_id
       WHERE a.user_id = @p0
-      ORDER BY cs.day_of_week, cs.start_time, r.name, o.id;
+      ORDER BY o.day_of_week, o.start_time, r.name, o.id;
     `;
     const r = await query(sql, [user_id]);
 
-    // Build week buckets 0..6
+    // Build weekly structure
     const week = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
     for (const row of r.recordset) {
       week[String(row.day_of_week)].push({
         offering_id: row.offering_id,
-        subject: row.subject,
-        room: row.room,
+        course_code: row.course_code,
+        course_name: row.course_name,
+        department_name: row.department_name,
+        room: row.room_name,
         start_time: row.start_time,
         end_time: row.end_time,
         duration_minutes: row.duration_minutes,

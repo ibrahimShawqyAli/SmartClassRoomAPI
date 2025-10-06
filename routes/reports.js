@@ -1,16 +1,15 @@
-// routes/reports.js
 const express = require("express");
 const router = express.Router();
 const { query } = require("../DB/dbConnection");
 const auth = require("../middleware/auth");
 
-// normalize user from auth middleware (new or legacy)
+// normalize user from auth middleware
 function getReqUser(req) {
   const src = req.auth || req.user || {};
   return { id: src.id, role: (src.role || "").toLowerCase() };
 }
 
-// build 16 weekly dates starting at startDate (YYYY-MM-DD string)
+// build 16 weekly slots starting from an anchor date
 function generateWeeks(startISO) {
   const weeks = [];
   for (let w = 0; w < 16; w++) {
@@ -21,65 +20,60 @@ function generateWeeks(startISO) {
   return weeks;
 }
 
-// pick the first week’s anchor date:
-// 1) earliest planned_start_utc in course_sessions
-// 2) offering.created_at
-// 3) today
+// determine start anchor date (earliest session or course_offering.created_at)
 async function findAnchorDate(offeringId) {
-  // earliest session date
   const s = await query(
-    `SELECT TOP 1 planned_start_utc
-       FROM dbo.course_sessions
-      WHERE offering_id=@p0
+    `SELECT TOP 1 planned_start_utc 
+       FROM dbo.course_sessions 
+      WHERE offering_id=@p0 
       ORDER BY planned_start_utc ASC`,
     [offeringId]
   );
-  if (s.recordset.length && s.recordset[0].planned_start_utc) {
-    return s.recordset[0].planned_start_utc.toISOString().slice(0, 10);
-  }
+  if (s.recordset.length && s.recordset[0].planned_start_utc)
+    return new Date(s.recordset[0].planned_start_utc)
+      .toISOString()
+      .slice(0, 10);
 
-  // offering.created_at
   const o = await query(
-    `SELECT created_at FROM dbo.course_offerings WHERE id=@p0`,
+    `SELECT created_at 
+       FROM dbo.course_offerings 
+      WHERE id=@p0`,
     [offeringId]
   );
-  if (o.recordset.length && o.recordset[0].created_at) {
+  if (o.recordset.length && o.recordset[0].created_at)
     return new Date(o.recordset[0].created_at).toISOString().slice(0, 10);
-  }
 
-  // fallback: today
   return new Date().toISOString().slice(0, 10);
 }
 
-/**
- * STUDENT REPORT
- * POST /reports/student
- * Body: { offering_id }
- */
-router.get("/student", auth, async (req, res) => {
+/* ==============================
+   STUDENT REPORT
+   POST /reports/student
+   ============================== */
+router.post("/student", auth, async (req, res) => {
   try {
     const { id: userId, role } = getReqUser(req);
     const { offering_id } = req.body || {};
-    if (!offering_id) {
+
+    if (!offering_id)
       return res
         .status(400)
         .json({ status: false, error: "offering_id required" });
-    }
 
-    // permission: admin OR is assigned to this offering
+    // permission: admin OR assigned student
     if (role !== "admin") {
       const assigned = await query(
-        `SELECT 1 FROM dbo.offering_assignments WHERE offering_id=@p0 AND user_id=@p1`,
+        `SELECT 1 FROM dbo.offering_assignments 
+          WHERE offering_id=@p0 AND user_id=@p1 AND role='student'`,
         [offering_id, userId]
       );
-      if (!assigned.recordset.length) {
+      if (!assigned.recordset.length)
         return res
           .status(403)
-          .json({ status: false, error: "Not assigned to this offering" });
-      }
+          .json({ status: false, error: "Not assigned to this course" });
     }
 
-    // offering exists & name (optional for display)
+    // validate offering
     const off = await query(
       `SELECT o.id, o.created_at, c.name AS course_name
          FROM dbo.course_offerings o
@@ -87,13 +81,11 @@ router.get("/student", auth, async (req, res) => {
         WHERE o.id=@p0`,
       [offering_id]
     );
-    if (!off.recordset.length) {
+    if (!off.recordset.length)
       return res
         .status(404)
-        .json({ status: false, error: "Offering not found" });
-    }
+        .json({ status: false, error: "Course offering not found" });
 
-    // anchor + weeks
     const anchor = await findAnchorDate(offering_id);
     const weeks = generateWeeks(anchor);
     const today = new Date().toISOString().slice(0, 10);
@@ -117,7 +109,6 @@ router.get("/student", auth, async (req, res) => {
     );
     const attRows = att.recordset;
 
-    // helper: find session by Y-M-D
     const findByDate = (ymd) =>
       ses.find(
         (s) =>
@@ -137,19 +128,18 @@ router.get("/student", auth, async (req, res) => {
       if (w.planned_date > today) {
         status = "upcoming";
       } else if (!session) {
-        // past date with no session => cancelled
         status = "cancelled";
       } else {
         const recs = attRows.filter((r) => r.session_id === session.id);
         const hasIn = recs.some((r) => r.check_in_at);
         if (hasIn) {
           status = "attend";
-          const minIn = recs
-            .filter((r) => r.check_in_at)
-            .map((r) => new Date(r.check_in_at).getTime());
-          check_in_time = new Date(Math.min(...minIn))
-            .toISOString()
-            .slice(11, 19);
+          const minIn = Math.min(
+            ...recs
+              .filter((r) => r.check_in_at)
+              .map((r) => new Date(r.check_in_at).getTime())
+          );
+          check_in_time = new Date(minIn).toISOString().slice(11, 19);
 
           const outs = recs.filter((r) => r.check_out_at);
           if (outs.length) {
@@ -177,6 +167,7 @@ router.get("/student", auth, async (req, res) => {
       status: true,
       offering_id,
       student_id: userId,
+      course_name: off.recordset[0].course_name,
       weeks_total: 16,
       weeks: weekReports,
       summary,
@@ -187,37 +178,34 @@ router.get("/student", auth, async (req, res) => {
   }
 });
 
-/**
- * TEACHER REPORT
- * POST /reports/teacher
- * Body: { offering_id }
- */
-router.get("/teacher", auth, async (req, res) => {
+/* ==============================
+   TEACHER REPORT
+   POST /reports/teacher
+   ============================== */
+router.post("/teacher", auth, async (req, res) => {
   try {
     const { id: userId, role } = getReqUser(req);
     const { offering_id } = req.body || {};
-    if (!offering_id) {
+
+    if (!offering_id)
       return res
         .status(400)
         .json({ status: false, error: "offering_id required" });
-    }
 
-    // permission: admin OR teacher on this offering
+    // permission: admin OR teacher on this course
     if (role !== "admin") {
       const assigned = await query(
-        `SELECT 1
-           FROM dbo.offering_assignments
+        `SELECT 1 FROM dbo.offering_assignments 
           WHERE offering_id=@p0 AND user_id=@p1 AND role='teacher'`,
         [offering_id, userId]
       );
-      if (!assigned.recordset.length) {
+      if (!assigned.recordset.length)
         return res
           .status(403)
           .json({ status: false, error: "Not assigned as teacher" });
-      }
     }
 
-    // offering check
+    // offering info
     const off = await query(
       `SELECT o.id, o.created_at, c.name AS course_name
          FROM dbo.course_offerings o
@@ -225,11 +213,10 @@ router.get("/teacher", auth, async (req, res) => {
         WHERE o.id=@p0`,
       [offering_id]
     );
-    if (!off.recordset.length) {
+    if (!off.recordset.length)
       return res
         .status(404)
-        .json({ status: false, error: "Offering not found" });
-    }
+        .json({ status: false, error: "Course offering not found" });
 
     const anchor = await findAnchorDate(offering_id);
     const weeks = generateWeeks(anchor);
@@ -277,7 +264,6 @@ router.get("/teacher", auth, async (req, res) => {
           ? new Date(session.started_at).toISOString().slice(11, 19)
           : null;
       } else {
-        // unknown status but in the past -> treat as cancelled
         status = "cancelled";
       }
 
@@ -294,6 +280,7 @@ router.get("/teacher", auth, async (req, res) => {
     return res.json({
       status: true,
       offering_id,
+      course_name: off.recordset[0].course_name,
       weeks_total: 16,
       weeks: weekReports,
       summary,
