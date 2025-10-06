@@ -51,7 +51,7 @@ router.post("/", async (req, res) => {
     // 3) Insert assignment
     const ins = `
       INSERT INTO dbo.offering_assignments (offering_id, user_id, role)
-      VALUES (@p0, @p1, @p2)
+      VALUES (@p0, @p1, @p2);
     `;
     await query(ins, [offering_id, user_id, user.role]);
 
@@ -60,15 +60,15 @@ router.post("/", async (req, res) => {
       message: `Assigned ${user.role} (user_id=${user_id}) to offering ${offering_id}`,
     });
   } catch (err) {
-    // Duplicate (already assigned)
-    if (err.number === 2627 || err.number === 2601) {
-      return res.status(409).json({
-        status: false,
-        error: "User already assigned to this offering",
-      });
+    if (err && (err.number === 2627 || err.number === 2601)) {
+      return res
+        .status(409)
+        .json({
+          status: false,
+          error: "User already assigned to this offering",
+        });
     }
-    // FK violations (bad ids)
-    if (err.number === 547) {
+    if (err && err.number === 547) {
       return res
         .status(400)
         .json({ status: false, error: "Invalid offering_id or user_id" });
@@ -94,50 +94,57 @@ router.post("/my-week", async (req, res) => {
         .json({ status: false, error: "user_id is required" });
     }
 
-    // If sessions are now stored in course_offerings, remove the join with course_sessions
     const sql = `
-  SELECT
-    o.day_of_week,
-    o.id             AS offering_id,
-    c.name           AS course_name,
-    c.code           AS course_code,
-    r.name           AS room_name,
-    d.name           AS department_name,
-    CONVERT(VARCHAR(5), o.start_time, 108) AS start_time,
-    CONVERT(VARCHAR(5), o.end_time,   108) AS end_time,
-    a.role
-  FROM dbo.offering_assignments a
-  JOIN dbo.course_offerings o ON o.id = a.offering_id
-  JOIN dbo.courses c ON c.id = o.course_id
-  LEFT JOIN dbo.departments d ON d.id = c.department_id
-  LEFT JOIN dbo.rooms r ON r.id = o.room_id
-  WHERE a.user_id = @p0
-  ORDER BY o.day_of_week, o.start_time, r.name, o.id;
-`;
+      SELECT
+        o.day_of_week,
+        o.id   AS offering_id,
+        c.name AS course_name,
+        c.code AS course_code,
+        r.name AS room_name,
+        d.name AS department_name,
+        CONVERT(VARCHAR(5), o.start_time, 108) AS start_time, -- HH:mm
+        CONVERT(VARCHAR(5), o.end_time,   108) AS end_time,   -- HH:mm
+        o.duration_minutes,
+        a.role
+      FROM dbo.offering_assignments a
+      JOIN dbo.course_offerings o ON o.id = a.offering_id
+      JOIN dbo.courses c          ON c.id = o.course_id
+      LEFT JOIN dbo.departments d ON d.id = c.department_id
+      LEFT JOIN dbo.rooms r       ON r.id = o.room_id
+      WHERE a.user_id = @p0
+      ORDER BY o.day_of_week,
+               o.start_time,
+               CASE WHEN r.name IS NULL THEN 1 ELSE 0 END, r.name,
+               o.id;
+    `;
 
     const r = await query(sql, [user_id]);
+
+    // Build weekly structure (0=Sun ... 6=Sat or your convention)
     const week = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
+
     for (const row of r.recordset) {
-      week[String(row.day_of_week)].push({
-        offering_id: row.offering_id,
-        course_code: row.course_code,
-        course_name: row.course_name,
-        department_name: row.department_name,
-        room: row.room_name,
-        start_time: row.start_time,
-        end_time: row.end_time,
-        role: row.role,
-      });
+      const dow = String(row.day_of_week);
+      if (week.hasOwnProperty(dow)) {
+        week[dow].push({
+          offering_id: row.offering_id,
+          course_code: row.course_code,
+          course_name: row.course_name,
+          department_name: row.department_name,
+          room: row.room_name,
+          start_time: row.start_time,
+          end_time: row.end_time,
+          duration_minutes: row.duration_minutes,
+          role: row.role,
+        });
+      }
+      // If day_of_week is NULL or unexpected, we silently skip it.
     }
 
-    return res.json({
-      status: true,
-      user_id,
-      totals: Object.fromEntries(
-        Object.keys(week).map((k) => [k, week[k].length])
-      ),
-      data: week,
-    });
+    const totals = {};
+    for (const k of Object.keys(week)) totals[k] = week[k].length;
+
+    return res.json({ status: true, user_id, totals, data: week });
   } catch (err) {
     console.error("my-week error:", err);
     return res
