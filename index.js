@@ -25,7 +25,7 @@ app.get("/", (req, res) => res.json({ ok: true }));
 app.use("/", require("./routes/offeringDetails.js"));
 
 // auth
-app.use("/auth", require("./routes/auth"));
+app.use("/auth", require("./routes/auth.js"));
 
 // NEW offering-based routes
 app.use("/offerings", require("./routes/offerings.js"));
@@ -37,11 +37,11 @@ app.use("/lecture-assignments", require("./routes/offeringAssignments.js"));
 app.use("/lecture-sessions", require("./routes/getLectureSessions.js"));
 // Face recognition, attendance, reports, weekly summary
 app.use("/fr", require("./routes/face.js"));
-app.use("/attendance", require("./routes/attendance"));
-app.use("/reports", require("./routes/reports"));
+app.use("/attendance", require("./routes/attendance.js"));
+app.use("/reports", require("./routes/reports.js"));
 app.use("/weekly-reports", require("./routes/summary.js"));
-app.use("/files", require("./routes/files"));
-app.use("/admin", require("./routes/adminOps"));
+app.use("/files", require("./routes/files.js"));
+app.use("/admin", require("./routes/adminOps.js"));
 
 // Admin dashboard
 app.use("/dashboard", require("./dashboard_routes/index.js"));
