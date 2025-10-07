@@ -50,7 +50,7 @@ async function findAnchorDate(offeringId) {
    STUDENT REPORT
    POST /reports/student
    ============================== */
-router.post("/student", auth, async (req, res) => {
+router.get("/student", auth, async (req, res) => {
   try {
     const { id: userId, role } = getReqUser(req);
     const { offering_id } = req.body || {};
@@ -182,7 +182,7 @@ router.post("/student", auth, async (req, res) => {
    TEACHER REPORT
    POST /reports/teacher
    ============================== */
-router.post("/teacher", auth, async (req, res) => {
+router.get("/teacher", auth, async (req, res) => {
   try {
     const { id: userId, role } = getReqUser(req);
     const { offering_id } = req.body || {};
