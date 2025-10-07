@@ -92,57 +92,64 @@ router.post("/my-week", async (req, res) => {
         .json({ status: false, error: "user_id is required" });
     }
 
+    // Pull all assignments for the user (offerings-based),
+    // but alias columns to match the OLD response model.
     const sql = `
       SELECT
         o.day_of_week,
-        o.id   AS offering_id,
-        c.name AS course_name,
-        c.code AS course_code,
-        r.name AS room_name,
-        d.name AS department_name,
-        CONVERT(VARCHAR(5), o.start_time, 108) AS start_time, -- HH:mm
-        CONVERT(VARCHAR(5), o.end_time,   108) AS end_time,   -- HH:mm
+        o.id                              AS offering_id,          -- replaces lecture_id
+        c.name                            AS name,                 -- same key 'name'
+        r.name                            AS place,                -- same key 'place'
+        o.start_date                      AS start_date,           -- same key 'start_date' (first calendar date)
+        CONVERT(VARCHAR(8), o.start_time, 108) AS start_time,      -- "HH:mm:ss"
+        CONVERT(VARCHAR(8), o.end_time,   108) AS end_time,        -- "HH:mm:ss"
         o.duration_minutes,
         a.role
       FROM dbo.offering_assignments a
       JOIN dbo.course_offerings o ON o.id = a.offering_id
       JOIN dbo.courses c          ON c.id = o.course_id
-      LEFT JOIN dbo.departments d ON d.id = c.department_id
       LEFT JOIN dbo.rooms r       ON r.id = o.primary_room_id
       WHERE a.user_id = @p0
-      ORDER BY o.day_of_week,
-               o.start_time,
-               CASE WHEN r.name IS NULL THEN 1 ELSE 0 END, r.name,
-               o.id;
+      ORDER BY
+        o.day_of_week,
+        o.start_time,
+        CASE WHEN r.name IS NULL THEN 1 ELSE 0 END, r.name,
+        o.id;
     `;
 
     const r = await query(sql, [user_id]);
 
-    // Build weekly structure (0=Sun ... 6=Sat or your convention)
+    // Build week buckets "0".."6" to match previous response exactly.
     const week = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
 
     for (const row of r.recordset) {
       const dow = String(row.day_of_week);
-      if (week.hasOwnProperty(dow)) {
+      if (Object.prototype.hasOwnProperty.call(week, dow)) {
         week[dow].push({
-          offering_id: row.offering_id,
-          course_code: row.course_code,
-          course_name: row.course_name,
-          department_name: row.department_name,
-          room: row.room_name,
-          start_time: row.start_time,
-          end_time: row.end_time,
+          offering_id: row.offering_id, // renamed key
+          name: row.name, // same key as old
+          place: row.place ?? null, // same key as old
+          start_date: row.start_date ?? null, // same key as old
+          start_time: row.start_time, // "HH:mm:ss"
+          end_time: row.end_time, // "HH:mm:ss"
           duration_minutes: row.duration_minutes,
-          role: row.role,
+          role: row.role, // 'student' or 'teacher'
         });
       }
-      // If day_of_week is NULL or unexpected, we silently skip it.
+      // If day_of_week is NULL or outside 0..6, skip (same behavior as before).
     }
 
-    const totals = {};
-    for (const k of Object.keys(week)) totals[k] = week[k].length;
+    // Totals per DOW, same as old
+    const totals = Object.fromEntries(
+      Object.keys(week).map((k) => [k, week[k].length])
+    );
 
-    return res.json({ status: true, user_id, totals, data: week });
+    return res.json({
+      status: true,
+      user_id,
+      totals,
+      data: week,
+    });
   } catch (err) {
     console.error("my-week error:", err);
     return res
