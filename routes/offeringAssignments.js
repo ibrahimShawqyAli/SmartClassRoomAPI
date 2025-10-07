@@ -92,54 +92,68 @@ router.post("/my-week", async (req, res) => {
         .json({ status: false, error: "user_id is required" });
     }
 
-    // Pull all assignments for the user (offerings-based),
-    // but alias columns to match the OLD response model.
+    // ---- Your SQL exactly as provided (no column changes) ----
     const sql = `
       SELECT
         o.day_of_week,
-        o.id                              AS offering_id,          -- replaces lecture_id
-        c.name                            AS name,                 -- same key 'name'
-        r.name                            AS place,                -- same key 'place'
-        o.start_date                      AS start_date,           -- same key 'start_date' (first calendar date)
-        CONVERT(VARCHAR(8), o.start_time, 108) AS start_time,      -- "HH:mm:ss"
-        CONVERT(VARCHAR(8), o.end_time,   108) AS end_time,        -- "HH:mm:ss"
+        o.id   AS offering_id,
+        c.name AS course_name,
+        c.code AS course_code,
+        r.name AS room_name,
+        d.name AS department_name,
+        CONVERT(VARCHAR(5), o.start_time, 108) AS start_time, -- HH:mm
+        CONVERT(VARCHAR(5), o.end_time,   108) AS end_time,   -- HH:mm
         o.duration_minutes,
         a.role
       FROM dbo.offering_assignments a
       JOIN dbo.course_offerings o ON o.id = a.offering_id
       JOIN dbo.courses c          ON c.id = o.course_id
+      LEFT JOIN dbo.departments d ON d.id = c.department_id
       LEFT JOIN dbo.rooms r       ON r.id = o.primary_room_id
       WHERE a.user_id = @p0
-      ORDER BY
-        o.day_of_week,
-        o.start_time,
-        CASE WHEN r.name IS NULL THEN 1 ELSE 0 END, r.name,
-        o.id;
+      ORDER BY o.day_of_week,
+               o.start_time,
+               CASE WHEN r.name IS NULL THEN 1 ELSE 0 END, r.name,
+               o.id;
     `;
 
     const r = await query(sql, [user_id]);
 
-    // Build week buckets "0".."6" to match previous response exactly.
+    // Old API returned "HH:mm:ss" — normalize your "HH:mm" to match
+    const hhmmToHhmmss = (t) => {
+      if (!t) return null;
+      // handles cases already in HH:mm:ss
+      return t.length === 5 ? `${t}:00` : t;
+    };
+
+    // Build week buckets "0".."6" exactly like old API
     const week = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
 
     for (const row of r.recordset) {
       const dow = String(row.day_of_week);
-      if (Object.prototype.hasOwnProperty.call(week, dow)) {
-        week[dow].push({
-          offering_id: row.offering_id, // renamed key
-          name: row.name, // same key as old
-          place: row.place ?? null, // same key as old
-          start_date: row.start_date ?? null, // same key as old
-          start_time: row.start_time, // "HH:mm:ss"
-          end_time: row.end_time, // "HH:mm:ss"
-          duration_minutes: row.duration_minutes,
-          role: row.role, // 'student' or 'teacher'
-        });
-      }
-      // If day_of_week is NULL or outside 0..6, skip (same behavior as before).
+      if (!Object.prototype.hasOwnProperty.call(week, dow)) continue;
+
+      week[dow].push({
+        // old key was lecture_id -> now offering_id
+        offering_id: row.offering_id,
+
+        // keep same key names as OLD API:
+        name: row.course_name, // was 'name'
+        place: row.room_name ?? null, // was 'place'
+
+        // your schema doesn't have start_date; keep shape with null
+        start_date: null, // keep the field for compatibility
+
+        // normalized to "HH:mm:ss" like old API
+        start_time: hhmmToHhmmss(row.start_time),
+        end_time: hhmmToHhmmss(row.end_time),
+
+        duration_minutes: row.duration_minutes ?? null,
+        role: row.role, // 'student' | 'teacher'
+      });
     }
 
-    // Totals per DOW, same as old
+    // Totals per day, same as before
     const totals = Object.fromEntries(
       Object.keys(week).map((k) => [k, week[k].length])
     );
