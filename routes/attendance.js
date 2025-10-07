@@ -4,16 +4,6 @@ const router = express.Router();
 const { query } = require("../DB/dbConnection");
 const auth = require("../middleware/auth");
 
-/**
- * POST /attendance/check
- * Body: {
- *   offering_id: number,
- *   action: "checkin" | "checkout",
- *   modulation_string: string,
- *   udid?: string,
- *   now_ts?: ISO string (optional, for testing)
- * }
- */
 router.post("/check", auth, async (req, res) => {
   try {
     const { offering_id, action, modulation_string, udid, now_ts } = req.body;
@@ -31,8 +21,7 @@ router.post("/check", auth, async (req, res) => {
       });
     }
 
-    // -------- 1) Offering lookup (and optional modulation check) --------
-    // First, check if course_offerings.modulation_string exists
+    // 1) Offering exists? (and optional modulation_string check if column exists)
     let hasModulationCol = false;
     try {
       const col = await query(
@@ -41,87 +30,133 @@ router.post("/check", auth, async (req, res) => {
       hasModulationCol =
         !!col.recordset?.[0] && col.recordset[0].hasCol !== null;
     } catch {
-      // ignore; treat as no column
-      hasModulationCol = false;
+      /* ignore */
     }
 
-    // Get offering (optionally including modulation_string)
-    let offSql, offParams;
-    if (hasModulationCol) {
-      offSql = `SELECT id, modulation_string FROM dbo.course_offerings WHERE id=@p0`;
-      offParams = [offering_id];
-    } else {
-      offSql = `SELECT id FROM dbo.course_offerings WHERE id=@p0`;
-      offParams = [offering_id];
-    }
-
-    const off = await query(offSql, offParams);
+    const off = await query(
+      hasModulationCol
+        ? `SELECT id, modulation_string FROM dbo.course_offerings WHERE id=@p0`
+        : `SELECT id FROM dbo.course_offerings WHERE id=@p0`,
+      [offering_id]
+    );
     if (!off.recordset.length) {
       return res
         .status(404)
         .json({ status: false, error: "Offering not found" });
     }
-
     if (hasModulationCol) {
-      const { modulation_string: expected } = off.recordset[0];
+      const expected = off.recordset[0].modulation_string;
       if (expected && expected !== modulation_string) {
         return res
           .status(400)
           .json({ status: false, error: "Modulation mismatch" });
       }
     }
-    // If column not present, we skip modulation validation by design.
 
-    // -------- 2) Assignment check (user must be assigned unless admin) --------
+    // 2) User assigned? (unless admin)
     const asg = await query(
-      `SELECT role 
-         FROM dbo.offering_assignments 
-        WHERE offering_id=@p0 AND user_id=@p1`,
+      `SELECT role FROM dbo.offering_assignments WHERE offering_id=@p0 AND user_id=@p1`,
       [offering_id, req.user.id]
     );
     if (!asg.recordset.length && req.user.role !== "admin") {
-      return res.status(403).json({
-        status: false,
-        error: "User not assigned to this offering",
-      });
+      return res
+        .status(403)
+        .json({ status: false, error: "User not assigned to this offering" });
     }
 
-    // -------- 3) Choose the correct session for TODAY --------
-    // Uses course_sessions (mirror of lecture_sessions in old flow)
-    const today = (now_ts ? new Date(now_ts) : new Date())
-      .toISOString()
-      .slice(0, 10);
+    // 3) Pick session for "now" with fallbacks depending on available columns
+    const nowIso = (now_ts ? new Date(now_ts) : new Date()).toISOString();
 
-    // For check-in: require a STARTED session; pick the latest one
-    let sessSql = `
-      SELECT TOP 1 id, status
-      FROM dbo.course_sessions
-      WHERE offering_id=@p0 AND planned_date=@p1 AND status='started'
-      ORDER BY
-        ISNULL(started_at,
-               DATEADD(SECOND, DATEDIFF(SECOND, 0, planned_start_time), CAST(planned_date AS DATETIME2))
-        ) DESC,
-        id DESC
-    `;
-    let sess = await query(sessSql, [offering_id, today]);
+    // Detect columns on dbo.course_sessions
+    const cols = await query(`
+      SELECT
+        COL_LENGTH('dbo.course_sessions','planned_date') AS has_planned_date,
+        COL_LENGTH('dbo.course_sessions','planned_start_time') AS has_planned_start_time,
+        COL_LENGTH('dbo.course_sessions','planned_end_time') AS has_planned_end_time,
+        COL_LENGTH('dbo.course_sessions','started_at') AS has_started_at,
+        COL_LENGTH('dbo.course_sessions','ended_at') AS has_ended_at
+    `);
 
-    // For checkout: prefer a STARTED session; if none, fall back to most recent ENDED today
-    if (action === "checkout" && !sess.recordset.length) {
-      sessSql = `
-        SELECT TOP 1 id, status
-        FROM dbo.course_sessions
-        WHERE offering_id=@p0 AND planned_date=@p1 AND status IN ('started','ended')
-        ORDER BY
-          CASE WHEN status='started' THEN 1 ELSE 2 END, -- started first
-          ISNULL(started_at,
-                 DATEADD(SECOND, DATEDIFF(SECOND, 0, planned_start_time), CAST(planned_date AS DATETIME2))
-          ) DESC,
-          ISNULL(ended_at,
-                 DATEADD(SECOND, DATEDIFF(SECOND, 0, planned_end_time), CAST(planned_date AS DATETIME2))
-          ) DESC,
-          id DESC
-      `;
-      sess = await query(sessSql, [offering_id, today]);
+    const C = cols.recordset[0] || {};
+    const hasPlanned =
+      C.has_planned_date !== null && C.has_planned_start_time !== null;
+
+    let sess, sessSql, params;
+
+    if (action === "checkin") {
+      if (hasPlanned) {
+        // Original “today” logic using planned_* if present
+        sessSql = `
+          SELECT TOP 1 id, status
+          FROM dbo.course_sessions
+          WHERE offering_id=@p0
+            AND planned_date = CONVERT(date, @p1)
+            AND status='started'
+          ORDER BY
+            ISNULL(started_at,
+                   DATEADD(SECOND, DATEDIFF(SECOND, 0, planned_start_time), CAST(planned_date AS DATETIME2))
+            ) DESC,
+            id DESC
+        `;
+        params = [offering_id, nowIso];
+      } else {
+        // Fallback: latest STARTED session for this offering (no planned_* columns)
+        sessSql = `
+          SELECT TOP 1 id, status
+          FROM dbo.course_sessions
+          WHERE offering_id=@p0 AND status='started'
+          ORDER BY
+            CASE WHEN ${
+              C.has_started_at !== null ? "started_at" : "id"
+            } IS NULL THEN 1 ELSE 0 END,
+            ${C.has_started_at !== null ? "started_at DESC," : ""}
+            id DESC
+        `;
+        params = [offering_id];
+      }
+      sess = await query(sessSql, params);
+    } else {
+      // checkout: prefer STARTED else most recent ENDED (today if we can; else latest)
+      if (hasPlanned) {
+        sessSql = `
+          SELECT TOP 1 id, status
+          FROM dbo.course_sessions
+          WHERE offering_id=@p0
+            AND planned_date = CONVERT(date, @p1)
+            AND status IN ('started','ended')
+          ORDER BY
+            CASE WHEN status='started' THEN 1 ELSE 2 END,
+            ISNULL(started_at,
+                   DATEADD(SECOND, DATEDIFF(SECOND, 0, planned_start_time), CAST(planned_date AS DATETIME2))
+            ) DESC,
+            ISNULL(ended_at,
+                   DATEADD(SECOND, DATEDIFF(SECOND, 0, planned_end_time), CAST(planned_date AS DATETIME2))
+            ) DESC,
+            id DESC
+        `;
+        params = [offering_id, nowIso];
+      } else {
+        sessSql = `
+          SELECT TOP 1 id, status
+          FROM dbo.course_sessions
+          WHERE offering_id=@p0 AND status IN ('started','ended')
+          ORDER BY
+            CASE WHEN status='started' THEN 1 ELSE 2 END,
+            ${
+              C.has_started_at !== null
+                ? "ISNULL(started_at, '1900-01-01') DESC,"
+                : ""
+            }
+            ${
+              C.has_ended_at !== null
+                ? "ISNULL(ended_at,   '1900-01-01') DESC,"
+                : ""
+            }
+            id DESC
+        `;
+        params = [offering_id];
+      }
+      sess = await query(sessSql, params);
     }
 
     if (!sess.recordset.length) {
@@ -136,7 +171,7 @@ router.post("/check", auth, async (req, res) => {
 
     const session_id = sess.recordset[0].id;
 
-    // -------- 4) Write attendance (first in, last out) --------
+    // 4) Write attendance (first-in, last-out)
     const upsertSql =
       action === "checkin"
         ? `
@@ -175,7 +210,7 @@ router.post("/check", auth, async (req, res) => {
       udid || null,
     ]);
 
-    // -------- 5) Notify teachers (socket room for offerings) --------
+    // 5) Notify teachers (offering room)
     const io = req.app.get("io");
     if (io) {
       io.to(`off:${offering_id}:teachers`).emit("attendance_updated", {
