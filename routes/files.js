@@ -79,13 +79,17 @@ async function getOfferingRole(offeringId, userId) {
    Body (multipart/form-data): { session_id, title?, file }
    Auth: teacher assigned to that offering, or admin
    ========================================================= */
+
 router.post("/upload", upload.single("file"), auth, async (req, res) => {
   try {
-    const { id: userId, role: userRole } = getReqUser(req);
+    if (!req.file)
+      return res.status(400).json({ status: false, error: "file is required" });
+
+    const { id: userId, role: userRole } = req.auth || req.user || {};
     const { session_id, title } = req.body || {};
 
     if (!session_id) {
-      if (req.file) fs.unlinkSync(req.file.path);
+      fs.unlinkSync(req.file.path);
       return res
         .status(400)
         .json({ status: false, error: "session_id is required" });
@@ -93,28 +97,23 @@ router.post("/upload", upload.single("file"), auth, async (req, res) => {
 
     const session = await getSession(Number(session_id));
     if (!session) {
-      if (req.file) fs.unlinkSync(req.file.path);
+      fs.unlinkSync(req.file.path);
       return res
         .status(404)
         .json({ status: false, error: "Session not found" });
     }
 
-    // only assigned teacher or admin can upload
     const assignRole = await getOfferingRole(session.offering_id, userId);
-    const isTeacher = assignRole === "teacher" || userRole === "admin";
-    if (!isTeacher) {
-      if (req.file) fs.unlinkSync(req.file.path);
-      return res.status(403).json({
-        status: false,
-        error: "Only assigned teacher/admin can upload",
-      });
+    if (!(assignRole === "teacher" || userRole === "admin")) {
+      fs.unlinkSync(req.file.path);
+      return res
+        .status(403)
+        .json({
+          status: false,
+          error: "Only assigned teacher/admin can upload",
+        });
     }
 
-    if (!req.file) {
-      return res.status(400).json({ status: false, error: "file is required" });
-    }
-
-    // Store a URL relative to server root; static is already mounted at /uploads
     const fileUrl = `/uploads/${path.basename(req.file.path)}`;
     const finalTitle = (title || req.file.originalname || "file").trim();
 
