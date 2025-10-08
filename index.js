@@ -50,7 +50,12 @@ app.use("/dashboard", require("./dashboard_routes/index.js"));
 app.use((req, res) =>
   res.status(404).json({ status: false, error: "Not found", path: req.path })
 );
-
+app.use((err, req, res, next) => {
+  if (err && err.message === "Unsupported file type") {
+    return res.status(400).json({ status: false, error: err.message });
+  }
+  next(err);
+});
 /* ============== SOCKET.IO ============== */
 // Socket.IO auth
 io.use((socket, next) => {

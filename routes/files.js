@@ -26,7 +26,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+  limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowed = new Set([
       "application/pdf",
@@ -41,7 +41,8 @@ const upload = multer({
       "application/vnd.openxmlformats-officedocument.presentationml.presentation",
       "application/vnd.ms-powerpoint",
     ]);
-    cb(allowed.has(file.mimetype) ? null : new Error("Unsupported file type"));
+    if (allowed.has(file.mimetype)) return cb(null, true); // ✅ accept
+    return cb(new Error("Unsupported file type")); // ❌ reject with error
   },
 });
 
@@ -78,7 +79,7 @@ async function getOfferingRole(offeringId, userId) {
    Body (multipart/form-data): { session_id, title?, file }
    Auth: teacher assigned to that offering, or admin
    ========================================================= */
-router.post("/upload", auth, upload.single("file"), async (req, res) => {
+router.post("/upload", upload.single("file"), auth, async (req, res) => {
   try {
     const { id: userId, role: userRole } = getReqUser(req);
     const { session_id, title } = req.body || {};
@@ -103,12 +104,10 @@ router.post("/upload", auth, upload.single("file"), async (req, res) => {
     const isTeacher = assignRole === "teacher" || userRole === "admin";
     if (!isTeacher) {
       if (req.file) fs.unlinkSync(req.file.path);
-      return res
-        .status(403)
-        .json({
-          status: false,
-          error: "Only assigned teacher/admin can upload",
-        });
+      return res.status(403).json({
+        status: false,
+        error: "Only assigned teacher/admin can upload",
+      });
     }
 
     if (!req.file) {
