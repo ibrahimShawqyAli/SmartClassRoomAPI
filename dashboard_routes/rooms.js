@@ -106,7 +106,7 @@ router.get("/", auth, requireAdmin, async (req, res) => {
       data: dataRes.recordset,
     });
   } catch (err) {
-    console.error("rooms list error:", err);
+    console.error("rooms list error Code:", err);
     return res.status(500).json({ status: false, error: "Server error" });
   }
 });
