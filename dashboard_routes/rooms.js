@@ -35,19 +35,79 @@ router.post("/", auth, requireAdmin, async (req, res) => {
   }
 });
 
-/** READ (add auth here too) */
+// GET /rooms?Page=1&limit=20&search=lab&building_id=3
 router.get("/", auth, requireAdmin, async (req, res) => {
   try {
-    const r = await query(`
-      SELECT r.id, r.name, r.building_id, r.modulation_string, b.name AS building_name
+    // same helper you use for users
+    const { page, limit, search } = parsePaging(req.query);
+
+    // optional exact filter
+    const buildingId =
+      req.query.building_id !== undefined && req.query.building_id !== ""
+        ? Number(req.query.building_id)
+        : null;
+
+    // dynamic WHERE with params (keep order stable!)
+    const filters = [];
+    const params = [];
+
+    if (search) {
+      // search across room name, building name, modulation string
+      filters.push(
+        "(r.name LIKE @p0 OR b.name LIKE @p0 OR r.modulation_string LIKE @p0)"
+      );
+      params.push(`%${search}%`);
+    }
+
+    if (Number.isFinite(buildingId)) {
+      filters.push("r.building_id = @p" + params.length);
+      params.push(buildingId);
+    }
+
+    const where = filters.length ? "WHERE " + filters.join(" AND ") : "";
+
+    // total count
+    const countSql = `
+      SELECT COUNT(*) AS total
       FROM dbo.rooms r
       JOIN dbo.buildings b ON b.id = r.building_id
-      ORDER BY b.name, r.name
-    `);
-    res.json({ status: true, count: r.recordset.length, data: r.recordset });
+      ${where};
+    `;
+    const countRes = await query(countSql, params);
+    const total = countRes.recordset[0]?.total ?? 0;
+
+    // paging
+    const offset = (page - 1) * limit;
+
+    // data page
+    const dataSql = `
+      SELECT
+        r.id,
+        r.name,
+        r.building_id,
+        r.modulation_string,
+        b.name AS building_name
+      FROM dbo.rooms r
+      JOIN dbo.buildings b ON b.id = r.building_id
+      ${where}
+      ORDER BY b.name ASC, r.name ASC, r.id ASC
+      OFFSET @p${params.length} ROWS
+      FETCH NEXT @p${params.length + 1} ROWS ONLY;
+    `;
+    const dataParams = [...params, offset, limit];
+    const dataRes = await query(dataSql, dataParams);
+
+    return res.json({
+      status: true,
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit),
+      data: dataRes.recordset,
+    });
   } catch (err) {
-    console.error("List rooms error:", err);
-    res.status(500).json({ status: false, error: "Failed to fetch rooms" });
+    console.error("rooms list error:", err);
+    return res.status(500).json({ status: false, error: "Server error" });
   }
 });
 
