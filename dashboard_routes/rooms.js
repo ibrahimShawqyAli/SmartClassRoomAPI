@@ -4,6 +4,7 @@ const router = express.Router();
 const { query } = require("../DB/dbConnection");
 const auth = require("../middleware/auth");
 const requireAdmin = require("../helpers/requireAdmin");
+const { parsePaging } = require("../utils/paging");
 
 /** CREATE */
 router.post("/", auth, requireAdmin, async (req, res) => {
