@@ -11,9 +11,8 @@ require("dotenv").config();
 
 const app = express();
 // --- SSL (PFX) options ---
-const PFX_PATH =
-  process.env.PFX_PATH || "C:\\Win-ACME\\certs\\tidloc.visionvalley.net.pfx";
-const PFX_PASS = process.env.PFX_PASS || "Vv!1256";
+const PFX_PATH = "C:\\Win-ACME\\certs\\tidloc.pfx";
+const PFX_PASS = "Vv!1256";
 const sslOptions = { pfx: fs.readFileSync(PFX_PATH), passphrase: PFX_PASS };
 
 // HTTPS server (use the cert)
