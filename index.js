@@ -13,7 +13,10 @@ const app = express();
 // --- SSL (PFX) options ---
 const PFX_PATH = "C:\\Win-ACME\\certs\\tidloc.pfx";
 const PFX_PASS = "Vv!1256";
-const sslOptions = { pfx: fs.readFileSync(PFX_PATH), passphrase: PFX_PASS };
+const sslOptions = {
+  pfx: fs.readFileSync("C:\\ShawkyCertificate\\server.pfx"), // <-- double backslashes
+  passphrase: "1234",
+};
 
 // HTTPS server (use the cert)
 const server = https.createServer(sslOptions, app);
