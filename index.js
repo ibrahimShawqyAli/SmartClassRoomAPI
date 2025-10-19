@@ -189,7 +189,7 @@ app.get("/ok", (req, res) => {
 app.head("/ok", (req, res) => {
   res.type("text/plain").end();
 });
-const PORT = process.env.PORT || 443;
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () =>
   console.log(`HTTPS + Socket.IO With Sec on https://localhost:${PORT}`)
 );
