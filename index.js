@@ -188,7 +188,7 @@ app.head("/ok", (req, res) => {
 });
 const PORT = process.env.PORT || 443;
 server.listen(PORT, () =>
-  console.log(`HTTPS + Socket.IO on https://localhost:${PORT}`)
+  console.log(`HTTPS + Socket.IO With Sec on https://localhost:${PORT}`)
 );
 
 // Optional: small HTTP server to redirect :80 to HTTPS
