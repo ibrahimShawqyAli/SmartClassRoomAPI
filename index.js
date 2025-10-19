@@ -1,6 +1,8 @@
 // index.js
 const express = require("express");
 const http = require("http");
+const https = require("https");
+const fs = require("fs");
 const path = require("path");
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
@@ -8,7 +10,14 @@ const { query } = require("./DB/dbConnection");
 require("dotenv").config();
 
 const app = express();
-const server = http.createServer(app);
+// --- SSL (PFX) options ---
+const PFX_PATH =
+  process.env.PFX_PATH || "C:\\Win-ACME\\certs\\tidloc.visionvalley.net.pfx";
+const PFX_PASS = process.env.PFX_PASS || "Vv!1256";
+const sslOptions = { pfx: fs.readFileSync(PFX_PATH), passphrase: PFX_PASS };
+
+// HTTPS server (use the cert)
+const server = https.createServer(sslOptions, app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 app.use(express.json());
@@ -170,8 +179,27 @@ io.on("connection", (socket) => {
     }
   });
 });
+app.get("/ok", (req, res) => {
+  res.type("text/plain").send("OK");
+});
 
-const PORT = process.env.PORT || 3000;
+// (optional) also respond to HEAD checks
+app.head("/ok", (req, res) => {
+  res.type("text/plain").end();
+});
+const PORT = process.env.PORT || 443;
 server.listen(PORT, () =>
-  console.log(`Server + Socket.IO on http://localhost:${PORT}`)
+  console.log(`HTTPS + Socket.IO on https://localhost:${PORT}`)
 );
+
+// Optional: small HTTP server to redirect :80 to HTTPS
+const REDIRECT_PORT = 80;
+http
+  .createServer((req, res) => {
+    const host = req.headers.host?.replace(/:\d+$/, "") || "localhost";
+    res.writeHead(301, { Location: `https://${host}${req.url}` });
+    res.end();
+  })
+  .listen(REDIRECT_PORT, () =>
+    console.log(`HTTP -> HTTPS redirect on :${REDIRECT_PORT}`)
+  );
