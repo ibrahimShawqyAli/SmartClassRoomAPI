@@ -7,14 +7,40 @@ const path = require("path");
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const { query } = require("./DB/dbConnection");
+const cors = require("cors");
 require("dotenv").config();
 
 const app = express();
+const allowlist = (process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// if you’re using cookies, set CORS_CREDENTIALS=1; otherwise leave 0/empty
+const useCreds = ["1", "true", "yes"].includes(
+  String(process.env.CORS_CREDENTIALS || "").toLowerCase()
+);
+
+const corsOptions = {
+  origin: (origin, cb) => {
+    // allow server-to-server / curl (no Origin) and any origin in the allowlist
+    if (!origin || allowlist.length === 0 || allowlist.includes(origin))
+      return cb(null, true);
+    return cb(new Error("Not allowed by CORS"));
+  },
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  exposedHeaders: ["Content-Disposition"], // e.g., for file downloads
+  credentials: useCreds,
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 // --- SSL (PFX) options ---
-const PFX_PATH = "C:\\Win-ACME\\certs\\tidloc.pfx";
-const PFX_PASS = "Vv!1256";
+
 const sslOptions = {
-  pfx: fs.readFileSync("C:\\ShawkyCertificate\\server.pfx"), // <-- double backslashes
+  pfx: fs.readFileSync("C:\\NEWSSLTRIAL\\196.204.136.246.pfx"), // <-- double backslashes
   passphrase: "1234",
 };
 
