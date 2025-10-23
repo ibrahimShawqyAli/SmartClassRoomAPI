@@ -11,10 +11,15 @@ const cors = require("cors");
 require("dotenv").config();
 
 const app = express();
-const allowlist = (process.env.CORS_ORIGINS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+
+const raw = (process.env.CORS_ORIGINS || "").trim();
+const allowAll = raw === "*" || raw === "";
+const allowlist = allowAll
+  ? []
+  : raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
 
 const useCreds = ["1", "true", "yes"].includes(
   String(process.env.CORS_CREDENTIALS || "").toLowerCase()
@@ -22,8 +27,9 @@ const useCreds = ["1", "true", "yes"].includes(
 
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!origin || allowlist.length === 0 || allowlist.includes(origin))
-      return cb(null, true);
+    if (!origin) return cb(null, true);
+    if (allowAll) return cb(null, true);
+    if (allowlist.includes(origin)) return cb(null, true);
     return cb(new Error("Not allowed by CORS"));
   },
   methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
@@ -34,7 +40,9 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+
+app.options("(.*)", cors(corsOptions));
+
 // --- SSL (PFX) options ---
 
 const sslOptions = {
@@ -44,7 +52,13 @@ const sslOptions = {
 
 // HTTPS server (use the cert)
 const server = https.createServer(sslOptions, app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, {
+  cors: {
+    origin: allowAll ? true : allowlist,
+    methods: ["GET", "POST"],
+    credentials: useCreds,
+  },
+});
 
 app.use(express.json());
 app.set("io", io);
