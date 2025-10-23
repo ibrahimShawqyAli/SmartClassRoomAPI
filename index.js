@@ -16,21 +16,19 @@ const allowlist = (process.env.CORS_ORIGINS || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// if you’re using cookies, set CORS_CREDENTIALS=1; otherwise leave 0/empty
 const useCreds = ["1", "true", "yes"].includes(
   String(process.env.CORS_CREDENTIALS || "").toLowerCase()
 );
 
 const corsOptions = {
   origin: (origin, cb) => {
-    // allow server-to-server / curl (no Origin) and any origin in the allowlist
     if (!origin || allowlist.length === 0 || allowlist.includes(origin))
       return cb(null, true);
     return cb(new Error("Not allowed by CORS"));
   },
   methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-  exposedHeaders: ["Content-Disposition"], // e.g., for file downloads
+  exposedHeaders: ["Content-Disposition"],
   credentials: useCreds,
   optionsSuccessStatus: 204,
 };
@@ -40,7 +38,7 @@ app.options("*", cors(corsOptions));
 // --- SSL (PFX) options ---
 
 const sslOptions = {
-  pfx: fs.readFileSync("C:\\NEWSSLTRIAL\\196.204.136.246.pfx"), // <-- double backslashes
+  pfx: fs.readFileSync("C:\\NEWSSLTRIAL\\196.204.136.246.pfx"),
   passphrase: "1234",
 };
 
