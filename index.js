@@ -45,13 +45,15 @@ app.use(cors(corsOptions));
 
 // --- SSL (PFX) options ---
 
-const sslOptions = {
-  pfx: fs.readFileSync("C:\\NEWSSLTRIAL\\196.204.136.246.pfx"),
-  passphrase: "1234",
-};
+// const sslOptions = {
+//   pfx: fs.readFileSync("C:\\NEWSSLTRIAL\\196.204.136.246.pfx"),
+//   passphrase: "1234",
+// };
 
 // HTTPS server (use the cert)
-const server = https.createServer(sslOptions, app);
+// const server = https.createServer(sslOptions, app);
+const server = http.createServer(app);
+
 const io = new Server(server, {
   cors: {
     origin: allowAll ? true : allowlist,
@@ -232,14 +234,13 @@ server.listen(PORT, () =>
   console.log(`HTTPS + Socket.IO With Sec on https://localhost:${PORT}`)
 );
 
-// Optional: small HTTP server to redirect :80 to HTTPS
-const REDIRECT_PORT = 80;
-http
-  .createServer((req, res) => {
-    const host = req.headers.host?.replace(/:\d+$/, "") || "localhost";
-    res.writeHead(301, { Location: `https://${host}${req.url}` });
-    res.end();
-  })
-  .listen(REDIRECT_PORT, () =>
-    console.log(`HTTP -> HTTPS redirect on :${REDIRECT_PORT}`)
-  );
+// const REDIRECT_PORT = 80;
+// http
+//   .createServer((req, res) => {
+//     const host = req.headers.host?.replace(/:\d+$/, "") || "localhost";
+//     res.writeHead(301, { Location: `https://${host}${req.url}` });
+//     res.end();
+//   })
+//   .listen(REDIRECT_PORT, () =>
+//     console.log(`HTTP -> HTTPS redirect on :${REDIRECT_PORT}`)
+//   );
