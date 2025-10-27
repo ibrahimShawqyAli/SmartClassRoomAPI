@@ -56,7 +56,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: allowAll ? true : allowlist,
+    origin: allowAll ? "*" : allowlist,
     methods: ["GET", "POST"],
     credentials: useCreds,
   },
@@ -64,9 +64,6 @@ const io = new Server(server, {
 
 app.use(express.json());
 app.set("io", io);
-
-// static files for uploaded content
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 // health
 app.get("/", (req, res) => res.json({ ok: true }));
@@ -92,6 +89,7 @@ app.use("/attendance", require("./routes/attendance.js"));
 app.use("/reports", require("./routes/reports.js"));
 app.use("/weekly-reports", require("./routes/summary.js"));
 app.use("/files", require("./routes/files.js"));
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use("/admin", require("./routes/adminOps.js"));
 
 // Admin dashboard
