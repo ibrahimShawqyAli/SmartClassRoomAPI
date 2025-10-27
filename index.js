@@ -158,12 +158,30 @@ function leaveOfferingRooms(socket, offeringId) {
 }
 
 io.on("connection", (socket) => {
-  // New events (preferred)
+  console.log("🔌 [SOCKET] Client connected:", socket.id, "user:", socket.user);
+
+  /* =========================================================
+     1) JOIN OFFERING (preferred for new clients)
+     ========================================================= */
   socket.on("join-offering", async (offeringId) => {
     try {
+      console.log(
+        "➡️ [SOCKET] join-offering request → user:",
+        socket.user?.id,
+        "offeringId:",
+        offeringId
+      );
+
       await joinOfferingRooms(socket, offeringId);
+
+      console.log(
+        "✅ [SOCKET] join-offering success → user:",
+        socket.user?.id,
+        "offeringId:",
+        offeringId
+      );
     } catch (e) {
-      console.error("join-offering error:", e);
+      console.error("❌ [SOCKET] join-offering error:", e);
       socket.emit("join-denied", {
         offering_id: offeringId,
         reason: "server error",
@@ -171,34 +189,70 @@ io.on("connection", (socket) => {
     }
   });
 
+  /* =========================================================
+     2) LEAVE OFFERING
+     ========================================================= */
   socket.on("leave-offering", (offeringId) => {
+    console.log(
+      "↩️ [SOCKET] leave-offering → user:",
+      socket.user?.id,
+      "offeringId:",
+      offeringId
+    );
     leaveOfferingRooms(socket, offeringId);
   });
 
-  // Backward-compatible legacy events (map to new)
+  /* =========================================================
+     3) JOIN LECTURE (legacy compatibility)
+        - tries to map lecture → offering via map_lecture_offering
+        - if not found, treats lectureId as offeringId directly
+     ========================================================= */
   socket.on("join-lecture", async (lectureId) => {
     try {
-      // find mapped offering (if map table exists)
+      console.log(
+        "➡️ [SOCKET] join-lecture request → user:",
+        socket.user?.id,
+        "lectureId:",
+        lectureId
+      );
+
       const m = await query(
         `SELECT offering_id FROM dbo.map_lecture_offering WHERE lecture_id=@p0`,
         [lectureId]
       );
-      const offeringId = m.recordset[0]?.offering_id || null;
+
+      let offeringId = m.recordset[0]?.offering_id || null;
+
       if (!offeringId) {
-        socket.emit("join-denied", {
+        // fallback: maybe client sent offering_id directly
+        offeringId = Number(lectureId);
+        console.log(
+          "⚠️ [SOCKET] join-lecture fallback → no map found, using lectureId as offeringId:",
+          offeringId
+        );
+      } else {
+        socket.emit("mapped-offering", {
           lecture_id: lectureId,
-          reason: "no mapping",
+          offering_id: offeringId,
         });
-        return;
+        console.log(
+          "✅ [SOCKET] join-lecture mapped → lectureId:",
+          lectureId,
+          "→ offeringId:",
+          offeringId
+        );
       }
+
       await joinOfferingRooms(socket, offeringId);
-      // Inform client of the mapped id (optional)
-      socket.emit("mapped-offering", {
-        lecture_id: lectureId,
-        offering_id: offeringId,
-      });
+
+      console.log(
+        "✅ [SOCKET] join-lecture success → user:",
+        socket.user?.id,
+        "offeringId:",
+        offeringId
+      );
     } catch (e) {
-      console.error("join-lecture error:", e);
+      console.error("❌ [SOCKET] join-lecture error:", e);
       socket.emit("join-denied", {
         lecture_id: lectureId,
         reason: "server error",
@@ -206,19 +260,57 @@ io.on("connection", (socket) => {
     }
   });
 
+  /* =========================================================
+     4) LEAVE LECTURE (legacy)
+     ========================================================= */
   socket.on("leave-lecture", async (lectureId) => {
     try {
+      console.log(
+        "↩️ [SOCKET] leave-lecture → user:",
+        socket.user?.id,
+        "lectureId:",
+        lectureId
+      );
+
       const m = await query(
         `SELECT offering_id FROM dbo.map_lecture_offering WHERE lecture_id=@p0`,
         [lectureId]
       );
-      const offeringId = m.recordset[0]?.offering_id || null;
-      if (offeringId) leaveOfferingRooms(socket, offeringId);
+
+      const offeringId = m.recordset[0]?.offering_id || Number(lectureId);
+
+      leaveOfferingRooms(socket, offeringId);
+
+      console.log(
+        "✅ [SOCKET] leave-lecture success → user:",
+        socket.user?.id,
+        "offeringId:",
+        offeringId
+      );
     } catch (e) {
-      // ignore
+      console.error("❌ [SOCKET] leave-lecture error:", e);
     }
   });
+
+  /* =========================================================
+     5) PING TEST (for debug)
+     ========================================================= */
+  socket.on("ping-test", (data) => {
+    console.log("📡 [SOCKET] ping-test from:", socket.user?.id, "data:", data);
+    socket.emit("pong-test", {
+      echo: data || true,
+      time: new Date().toISOString(),
+    });
+  });
+
+  /* =========================================================
+     6) DISCONNECT
+     ========================================================= */
+  socket.on("disconnect", (reason) => {
+    console.log("🔴 [SOCKET] Disconnected:", socket.id, "reason:", reason);
+  });
 });
+
 app.get("/ok", (req, res) => {
   res.type("text/plain").send("OK");
 });
