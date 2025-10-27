@@ -217,10 +217,9 @@ router.get("/list", auth, async (req, res) => {
    3) Download a file by post_id (assigned student/teacher/admin)
    GET /files/download/:postId
    ========================================================= */
-router.get("/download/:postId", auth, async (req, res) => {
-  try {
-    const { id: userId, role: userRole } = getReqUser(req);
-    const postId = Number(req.params.postId);
+router.get("/download/1", auth, async (req, res) => {
+  const { id: userId, role: userRole } = getReqUser(req);
+  const postId = Number(req.query.postId);
     if (!postId) {
       return res
         .status(400)
