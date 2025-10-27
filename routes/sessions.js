@@ -130,8 +130,11 @@ router.post("/start", auth, async (req, res) => {
     // 5) Notify sockets
     const io = req.app.get("io");
     const payload = { offering_id, session_id, at: new Date().toISOString() };
-    io.to(`off:${offering_id}:students`).emit("session_started", payload);
-    io.to(`off:${offering_id}:teachers`).emit("session_started", payload);
+
+    io.to(`off:${offering_id}:students`).emit("lecture_started", payload);
+    io.to(`off:${offering_id}:teachers`).emit("lecture_started", payload);
+
+    io.to(`off:${offering_id}:all`).emit("lecture_started", payload);
 
     return res.json({
       status: true,
@@ -226,8 +229,11 @@ router.post("/end", auth, async (req, res) => {
 
     const io = req.app.get("io");
     const payload = { offering_id, at: isoNow };
-    io.to(`off:${offering_id}:students`).emit("session_ended", payload);
-    io.to(`off:${offering_id}:teachers`).emit("session_ended", payload);
+
+    io.to(`off:${offering_id}:students`).emit("lecture_ended", payload);
+    io.to(`off:${offering_id}:teachers`).emit("lecture_ended", payload);
+
+    io.to(`off:${offering_id}:all`).emit("lecture_ended", payload);
 
     return res.json({
       status: true,
