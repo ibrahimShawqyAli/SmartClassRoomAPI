@@ -18,5 +18,5 @@ router.use("/courses", require("./courses"));
 router.use("/sections", require("./sections"));
 router.use("/assignments", require("./assignments"));
 router.use("/offering", require("./offering_Summary"));
-app.use("/scheduler", require("./scheduler"));
+router.use("/scheduler", require("./scheduler"));
 module.exports = router;
