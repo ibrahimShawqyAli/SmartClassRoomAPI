@@ -116,12 +116,10 @@ router.post("/upload", auth, upload.single("file"), async (req, res) => {
           fs.unlinkSync(req.file.path);
         } catch {}
       }
-      return res
-        .status(403)
-        .json({
-          status: false,
-          error: "Only assigned teacher/admin can upload",
-        });
+      return res.status(403).json({
+        status: false,
+        error: "Only assigned teacher/admin can upload",
+      });
     }
 
     if (!req.file) {
@@ -218,8 +216,9 @@ router.get("/list", auth, async (req, res) => {
    GET /files/download/:postId
    ========================================================= */
 router.get("/download/1", auth, async (req, res) => {
-  const { id: userId, role: userRole } = getReqUser(req);
-  const postId = Number(req.query.postId);
+  try {
+    const { id: userId, role: userRole } = getReqUser(req);
+    const postId = Number(req.query.postId);
     if (!postId) {
       return res
         .status(400)
