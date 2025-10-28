@@ -161,6 +161,103 @@ router.post("/photo", upload.single("file"), async (req, res) => {
      - EITHER multipart file field "file" OR `image_base64`
    Calls Python /verify with (file1=stored, file2=probe)
    ========================================================= */
+// router.post("/verify-user", upload.single("file"), async (req, res) => {
+//   try {
+//     const { user_id: user_id_raw, email: email_raw } = req.body || {};
+//     const resolved = await resolveUserId(user_id_raw, email_raw);
+//     if (!resolved) {
+//       return res
+//         .status(404)
+//         .json({ status: false, error: "User not found (by id or email)" });
+//     }
+//     const user_id = resolved.id;
+
+//     const probe = pickIncomingImage(req);
+//     if (!probe) {
+//       return res.status(400).json({
+//         status: false,
+//         error: "No image provided. Send multipart 'file' or 'image_base64'.",
+//       });
+//     }
+
+//     // find stored reference
+//     const existing = await query(
+//       "SELECT file_path FROM dbo.user_photos WHERE user_id=@p0",
+//       [user_id]
+//     );
+//     if (!existing.recordset.length) {
+//       return res
+//         .status(404)
+//         .json({ status: false, error: "No reference photo for this user" });
+//     }
+//     const refRel = existing.recordset[0].file_path;
+//     const refAbs = path.join(process.cwd(), refRel);
+//     if (!fs.existsSync(refAbs)) {
+//       return res
+//         .status(410)
+//         .json({ status: false, error: "Reference photo missing on server" });
+//     }
+
+//     // build multipart to Python
+//     const form = new FormData();
+//     form.append("file1", fs.createReadStream(refAbs), {
+//       filename: path.basename(refAbs),
+//       contentType: mime.lookup(refAbs) || "image/jpeg",
+//     });
+//     form.append("file2", probe.buffer, {
+//       filename: "probe.jpg",
+//       contentType: probe.mimeType,
+//     });
+
+//     const py = await fr.post("/verify", form, { headers: form.getHeaders() });
+//     const data = py.data;
+//     // after: const data = py.data;
+
+//     const SIMILARITY_THRESHOLD = 75; // tweak to your needs
+//     const COSINE_THRESHOLD = 0.65; // tweak to your needs
+
+//     // Prefer explicit flags if present; otherwise derive from thresholds
+//     const derivedMatch =
+//       (typeof data.match === "boolean" ? data.match : null) ??
+//       (typeof data.similarity_percent === "number"
+//         ? data.similarity_percent >= SIMILARITY_THRESHOLD
+//         : null) ??
+//       (typeof data.raw_cosine_similarity === "number"
+//         ? data.raw_cosine_similarity >= COSINE_THRESHOLD
+//         : false);
+
+//     // Choose a single "score" to expose (optional)
+//     const score =
+//       (typeof data.similarity_percent === "number" &&
+//         data.similarity_percent) ??
+//       (typeof data.raw_cosine_similarity === "number" &&
+//         data.raw_cosine_similarity) ??
+//       null;
+
+//     return res.json({
+//       status: true,
+//       user_id,
+//       email: resolved.email,
+//       match: true, //derivedMatch,
+//       score, // could be percent or cosine (document which one you use)
+//       raw: data,
+//     });
+//   } catch (e) {
+//     console.error("FR /verify-user error:", e?.response?.data || e.message);
+//     return (
+//       res
+//         //.status(502)
+//         .json({
+//           status: true,
+//           user_id,
+//           email: resolved.email,
+//           match: true, //derivedMatch,
+//           score, // could be percent or cosine (document which one you use)
+//           raw: data,
+//         })
+//     );
+//   }
+// });
 router.post("/verify-user", upload.single("file"), async (req, res) => {
   try {
     const { user_id: user_id_raw, email: email_raw } = req.body || {};
@@ -170,8 +267,8 @@ router.post("/verify-user", upload.single("file"), async (req, res) => {
         .status(404)
         .json({ status: false, error: "User not found (by id or email)" });
     }
-    const user_id = resolved.id;
 
+    // You can keep or remove these validations while testing:
     const probe = pickIncomingImage(req);
     if (!probe) {
       return res.status(400).json({
@@ -180,82 +277,22 @@ router.post("/verify-user", upload.single("file"), async (req, res) => {
       });
     }
 
-    // find stored reference
-    const existing = await query(
-      "SELECT file_path FROM dbo.user_photos WHERE user_id=@p0",
-      [user_id]
-    );
-    if (!existing.recordset.length) {
-      return res
-        .status(404)
-        .json({ status: false, error: "No reference photo for this user" });
-    }
-    const refRel = existing.recordset[0].file_path;
-    const refAbs = path.join(process.cwd(), refRel);
-    if (!fs.existsSync(refAbs)) {
-      return res
-        .status(410)
-        .json({ status: false, error: "Reference photo missing on server" });
-    }
-
-    // build multipart to Python
-    const form = new FormData();
-    form.append("file1", fs.createReadStream(refAbs), {
-      filename: path.basename(refAbs),
-      contentType: mime.lookup(refAbs) || "image/jpeg",
-    });
-    form.append("file2", probe.buffer, {
-      filename: "probe.jpg",
-      contentType: probe.mimeType,
-    });
-
-    const py = await fr.post("/verify", form, { headers: form.getHeaders() });
-    const data = py.data;
-    // after: const data = py.data;
-
-    const SIMILARITY_THRESHOLD = 75; // tweak to your needs
-    const COSINE_THRESHOLD = 0.65; // tweak to your needs
-
-    // Prefer explicit flags if present; otherwise derive from thresholds
-    const derivedMatch =
-      (typeof data.match === "boolean" ? data.match : null) ??
-      (typeof data.similarity_percent === "number"
-        ? data.similarity_percent >= SIMILARITY_THRESHOLD
-        : null) ??
-      (typeof data.raw_cosine_similarity === "number"
-        ? data.raw_cosine_similarity >= COSINE_THRESHOLD
-        : false);
-
-    // Choose a single "score" to expose (optional)
-    const score =
-      (typeof data.similarity_percent === "number" &&
-        data.similarity_percent) ??
-      (typeof data.raw_cosine_similarity === "number" &&
-        data.raw_cosine_similarity) ??
-      null;
-
+    // ⛔️ Skip DB lookups, form building, and fr.post("/verify")
+    // ✅ Return a fixed 'true' model
     return res.json({
       status: true,
-      user_id,
+      user_id: resolved.id,
       email: resolved.email,
-      match: true, //derivedMatch,
-      score, // could be percent or cosine (document which one you use)
-      raw: data,
+      match: true,
+      score: 100, // arbitrary mock score
+      raw: { mocked: true },
     });
   } catch (e) {
-    console.error("FR /verify-user error:", e?.response?.data || e.message);
-    return (
-      res
-        //.status(502)
-        .json({
-          status: true,
-          user_id,
-          email: resolved.email,
-          match: true, //derivedMatch,
-          score, // could be percent or cosine (document which one you use)
-          raw: data,
-        })
-    );
+    return res.status(200).json({
+      status: true,
+      match: true,
+      raw: { mocked: true, error_note: e.message },
+    });
   }
 });
 
