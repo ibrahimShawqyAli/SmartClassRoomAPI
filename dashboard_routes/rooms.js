@@ -6,6 +6,149 @@ const auth = require("../middleware/auth");
 const requireAdmin = require("../helpers/requireAdmin");
 const { parsePaging } = require("../utils/paging");
 
+// POST /rooms/check
+// Body:
+// {
+//   "room_id": 12,
+//   "day_index": 2,
+//   // EITHER pass a time slot id:
+//   "time_slot_id": 5,
+//   // OR pass times directly (HH:mm or minutes):
+//   // "start_time": "10:00",     // or 600
+//   // "end_time":   "11:30",     // or 690
+//   // Optional when editing an existing offering so it doesn't conflict with itself:
+//   // "exclude_offering_id": 123
+// }
+router.post("/check", auth, requireAdmin, async (req, res) => {
+  try {
+    const {
+      room_id,
+      day_index,
+      time_slot_id,
+      start_time,
+      end_time,
+      exclude_offering_id,
+    } = req.body || {};
+
+    // ---- basic validation
+    if (!room_id || day_index === undefined) {
+      return res.status(400).json({
+        status: false,
+        error: "room_id and day_index are required",
+      });
+    }
+
+    // ---- helpers
+    const toMinutes = (v) => {
+      if (v === undefined || v === null || v === "") return null;
+      if (Number.isFinite(v)) return Number(v);
+      // expect "HH:mm"
+      const m = String(v).match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return NaN;
+      const hh = Number(m[1]);
+      const mm = Number(m[2]);
+      return hh * 60 + mm;
+    };
+
+    // ---- resolve start_minute/end_minute either from slot or from times
+    let newStart = null;
+    let newEnd = null;
+
+    if (time_slot_id) {
+      const slotRes = await query(
+        `SELECT start_minute, end_minute
+           FROM dbo.time_slots
+          WHERE id=@p0`,
+        [time_slot_id]
+      );
+      if (!slotRes.recordset.length)
+        return res
+          .status(404)
+          .json({ status: false, error: "time_slot_id not found" });
+
+      newStart = Number(slotRes.recordset[0].start_minute);
+      newEnd = Number(slotRes.recordset[0].end_minute);
+    } else {
+      newStart = toMinutes(start_time);
+      newEnd = toMinutes(end_time);
+    }
+
+    if (
+      !Number.isFinite(newStart) ||
+      !Number.isFinite(newEnd) ||
+      newStart < 0 ||
+      newEnd <= newStart
+    ) {
+      return res.status(400).json({
+        status: false,
+        error:
+          "Invalid time range. Provide time_slot_id or valid start_time/end_time (HH:mm or minutes).",
+      });
+    }
+
+    // ---- check that room exists (optional but nice)
+    const roomRes = await query(`SELECT id, name FROM dbo.rooms WHERE id=@p0`, [
+      room_id,
+    ]);
+    if (!roomRes.recordset.length) {
+      return res.status(404).json({ status: false, error: "Room not found" });
+    }
+
+    // ---- conflict query (same overlap logic as offerings create/update)
+    // Conflict if: NOT (existing_end <= newStart OR existing_start >= newEnd)
+    const params = [room_id, day_index, newStart, newEnd];
+    let excludeClause = "";
+    if (exclude_offering_id) {
+      excludeClause = ` AND o.id <> @p${params.length}`;
+      params.push(exclude_offering_id);
+    }
+
+    const conflictSql = `
+      SELECT TOP 1
+             o.id               AS offering_id,
+             o.course_id,
+             o.start_minute,
+             o.end_minute,
+             o.day_index
+        FROM dbo.offerings o
+       WHERE o.room_id = @p0
+         AND o.day_index = @p1
+         AND NOT (o.end_minute <= @p2 OR o.start_minute >= @p3)
+         ${excludeClause}
+       ORDER BY o.start_minute ASC;
+    `;
+
+    const c = await query(conflictSql, params);
+    const conflict = c.recordset[0];
+
+    if (!conflict) {
+      return res.json({
+        status: true, // free to use (your requested semantics)
+        free: true,
+        message: "Room is free for the selected time.",
+        normalized: { start_minute: newStart, end_minute: newEnd },
+      });
+    }
+
+    // If we’re here, it’s taken:
+    return res.json({
+      status: false, // taken (your requested semantics)
+      free: false,
+      message: "Room is already booked for that time.",
+      conflict: {
+        offering_id: conflict.offering_id,
+        day_index: conflict.day_index,
+        start_minute: conflict.start_minute,
+        end_minute: conflict.end_minute,
+      },
+      normalized: { start_minute: newStart, end_minute: newEnd },
+    });
+  } catch (err) {
+    console.error("Room check error:", err);
+    return res.status(500).json({ status: false, error: "Server error" });
+  }
+});
+
 /** CREATE */
 router.post("/", auth, requireAdmin, async (req, res) => {
   try {

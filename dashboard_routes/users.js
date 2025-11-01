@@ -35,20 +35,26 @@ router.post("/", auth, requireAdmin, async (req, res) => {
       name,
       email,
       role,
-      department,
-      level,
-      section,
-      group_name,
-      password,
-      force_password_change,
+      level_id, // REQUIRED
+      department_id, // REQUIRED
     } = req.body || {};
 
-    // basic validation
+    // --- basic validation
     if (!name || !email || !role) {
       return res.status(400).json({
         status: false,
         error: "name, email and role are required",
       });
+    }
+    if (level_id == null) {
+      return res
+        .status(400)
+        .json({ status: false, error: "level_id is required" });
+    }
+    if (department_id == null) {
+      return res
+        .status(400)
+        .json({ status: false, error: "department_id is required" });
     }
 
     const allowedRoles = new Set(["student", "teacher", "assistant", "admin"]);
@@ -62,80 +68,147 @@ router.post("/", auth, requireAdmin, async (req, res) => {
       return res.status(400).json({ status: false, error: "Invalid email" });
     }
 
-    const rawPassword =
-      password && String(password).length >= 6 ? String(password) : "123456";
-    const hash = await bcrypt.hash(rawPassword, 10);
-    const fpc = force_password_change === false ? 0 : 1; // default true
-
-    // 🔒 Atomic insert that only runs when email doesn't exist
-    const sql = `
-      DECLARE @now datetime2 = SYSUTCDATETIME();
-
-      ;WITH newrow AS (
-        SELECT
-          @p0 AS name,
-          @p1 AS email,
-          @p2 AS password_hash,
-          @p3 AS department,
-          @p4 AS [level],
-          @p5 AS [section],
-          @p6 AS group_name,
-          @p7 AS role,
-          @p8 AS force_password_change,
-          @now AS created_at,
-          @now AS updated_at
-      )
-      INSERT INTO dbo.users
-        (name, email, password_hash, department, [level], [section], group_name, role, force_password_change, created_at, updated_at)
-      OUTPUT INSERTED.id
-      SELECT n.name, n.email, n.password_hash, n.department, n.[level], n.[section], n.group_name, n.role, n.force_password_change, n.created_at, n.updated_at
-      FROM newrow n
-      WHERE NOT EXISTS (SELECT 1 FROM dbo.users u WHERE u.email = @p1);
-    `;
-
-    const r = await query(sql, [
-      name,
+    // unique email
+    const exist = await query("SELECT id FROM dbo.users WHERE email=@p0", [
       cleanEmail,
-      hash,
-      department || null,
-      level || null,
-      section || null,
-      group_name || null,
-      roleStr,
-      fpc,
     ]);
-
-    // If no row inserted, the email already exists → 409
-    if (!r.recordset || r.recordset.length === 0) {
-      // optional: fetch id to include in response
-      const exist = await query("SELECT id FROM dbo.users WHERE email = @p0", [
-        cleanEmail,
-      ]);
+    if (exist.recordset.length) {
       return res.status(409).json({
         status: false,
         error: "Email already exists",
-        existing_user_id: exist.recordset?.[0]?.id ?? null,
+        existing_user_id: exist.recordset[0].id,
       });
     }
+
+    // validate FKs
+    const lvl = await query("SELECT id FROM dbo.levels WHERE id=@p0", [
+      Number(level_id),
+    ]);
+    if (!lvl.recordset.length) {
+      return res.status(400).json({ status: false, error: "Invalid level_id" });
+    }
+    const dep = await query(
+      "SELECT id, name FROM dbo.departments WHERE id=@p0",
+      [Number(department_id)]
+    );
+    if (!dep.recordset.length) {
+      return res
+        .status(400)
+        .json({ status: false, error: "Invalid department_id" });
+    }
+    const deptName = dep.recordset[0].name || null;
+
+    // AUTO ASSIGN: section/group (required behavior)
+    const pickSql = `
+      DECLARE @sid INT, @gid INT;
+      EXEC dbo.AutoAssignSectionGroup
+        @LevelId=@p0,
+        @DepartmentId=@p1,
+        @OutSectionId=@sid OUTPUT,
+        @OutGroupId=@gid OUTPUT;
+      SELECT @sid AS section_id, @gid AS group_id;
+    `;
+    const picked = await query(pickSql, [
+      Number(level_id),
+      Number(department_id),
+    ]);
+    const secId = picked.recordset[0]?.section_id;
+    const grpId = picked.recordset[0]?.group_id;
+    if (!secId || !grpId) {
+      return res.status(400).json({
+        status: false,
+        error:
+          "Auto assignment failed: no section/group available for this level/department",
+      });
+    }
+
+    // get names for legacy text fields
+    const names = await query(
+      `SELECT s.name AS section_name, g.name AS group_name
+       FROM dbo.sections s
+       LEFT JOIN dbo.groups g ON g.id=@p1
+       WHERE s.id=@p0`,
+      [secId, grpId]
+    );
+    const section_name = names.recordset[0]?.section_name || null;
+    const group_name = names.recordset[0]?.group_name || null;
+
+    // password: ALWAYS 123456; NEVER force reset
+    const rawPassword = "123456";
+    const hash = await bcrypt.hash(rawPassword, 10);
+    const fpc = 0;
+
+    // insert the user
+    const sql = `
+      DECLARE @now datetime2 = SYSUTCDATETIME();
+      INSERT INTO dbo.users
+        (name, email, password_hash, role,
+         department,           -- legacy text: fill with department name
+         level,                -- (keep NULL unless you mirror level name)
+         [section],            -- legacy text
+         group_name,           -- legacy text
+         department_id,        -- FK
+         level_id,             -- FK
+         section_id,           -- FK (auto)
+         group_id,             -- FK (auto)
+         force_password_change,
+         created_at, updated_at)
+      OUTPUT INSERTED.id
+      VALUES
+        (@p0, @p1, @p2, @p3,
+         @p4,
+         NULL,
+         @p5,
+         @p6,
+         @p7,
+         @p8,
+         @p9,
+         @p10,
+         @p11,
+         @now, @now);
+    `;
+
+    const r = await query(sql, [
+      name, // @p0
+      cleanEmail, // @p1
+      hash, // @p2
+      roleStr, // @p3
+      deptName, // @p4 legacy department name
+      section_name, // @p5 legacy section text
+      group_name, // @p6 legacy group text
+      Number(department_id), // @p7 FK
+      Number(level_id), // @p8 FK
+      secId, // @p9 FK
+      grpId, // @p10 FK
+      fpc, // @p11
+    ]);
 
     const newId = r.recordset[0].id;
 
     return res.json({
       status: true,
       id: newId,
-      message:
-        fpc === 1
-          ? "User created (default password set; user must change it on first login)"
-          : "User created",
-      default_password_used: rawPassword === "123456",
+      assigned: {
+        department_id: Number(department_id),
+        department: deptName,
+        level_id: Number(level_id),
+        section_id: secId,
+        section: section_name,
+        group_id: grpId,
+        group_name: group_name,
+      },
+      message: "User created & auto-assigned",
+      default_password_used: true,
     });
   } catch (e) {
-    // Fallback for extremely rare races or other constraint names
     const code = e?.originalError?.info?.number ?? e?.number;
     if (code === 2627 || code === 2601) {
       return res
         .status(409)
         .json({ status: false, error: "Email already exists" });
+    }
+    if (code === 50000) {
+      return res.status(400).json({ status: false, error: e.message });
     }
     console.error("Create user error:", e);
     return res.status(500).json({ status: false, error: "Server error" });

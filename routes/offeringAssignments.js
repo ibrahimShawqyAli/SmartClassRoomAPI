@@ -85,22 +85,42 @@ router.post("/", async (req, res) => {
  */
 router.post("/my-week", async (req, res) => {
   try {
-    const { user_id } = req.body;
+    const { user_id, department_id = null, level_id = null } = req.body || {};
     if (!user_id) {
       return res
         .status(400)
         .json({ status: false, error: "user_id is required" });
     }
 
-    // ---- Your SQL exactly as provided (no column changes) ----
+    // dynamic WHERE for optional dept/level filters
+    const whereExtra = [];
+    const params = [user_id];
+
+    if (department_id != null) {
+      whereExtra.push("c.department_id = @p" + params.length);
+      params.push(Number(department_id));
+    }
+    if (level_id != null) {
+      whereExtra.push("c.level_id = @p" + params.length);
+      params.push(Number(level_id));
+    }
+    const extraSql = whereExtra.length
+      ? " AND " + whereExtra.join(" AND ")
+      : "";
+
     const sql = `
       SELECT
         o.day_of_week,
-        o.id   AS offering_id,
-        c.name AS course_name,
-        c.code AS course_code,
-        r.name AS room_name,
-        d.name AS department_name,
+        o.id               AS offering_id,
+        c.id               AS course_id,
+        c.name             AS course_name,
+        c.code             AS course_code,
+        c.department_id,
+        d.name             AS department_name,
+        c.level_id,
+        lv.name            AS level_name,
+        r.id               AS room_id,
+        r.name             AS room_name,
         CONVERT(VARCHAR(5), o.start_time, 108) AS start_time, -- HH:mm
         CONVERT(VARCHAR(5), o.end_time,   108) AS end_time,   -- HH:mm
         o.duration_minutes,
@@ -109,24 +129,16 @@ router.post("/my-week", async (req, res) => {
       JOIN dbo.course_offerings o ON o.id = a.offering_id
       JOIN dbo.courses c          ON c.id = o.course_id
       LEFT JOIN dbo.departments d ON d.id = c.department_id
+      LEFT JOIN dbo.levels lv     ON lv.id = c.level_id
       LEFT JOIN dbo.rooms r       ON r.id = o.primary_room_id
       WHERE a.user_id = @p0
-      ORDER BY o.day_of_week,
-               o.start_time,
-               CASE WHEN r.name IS NULL THEN 1 ELSE 0 END, r.name,
-               o.id;
+        ${extraSql}
+      ORDER BY o.day_of_week, o.start_time, ISNULL(r.name, ''), o.id;
     `;
 
-    const r = await query(sql, [user_id]);
+    const r = await query(sql, params);
 
-    // Old API returned "HH:mm:ss" — normalize your "HH:mm" to match
-    const hhmmToHhmmss = (t) => {
-      if (!t) return null;
-      // handles cases already in HH:mm:ss
-      return t.length === 5 ? `${t}:00` : t;
-    };
-
-    // Build week buckets "0".."6" exactly like old API
+    const toHMS = (t) => (t ? (t.length === 5 ? `${t}:00` : t) : null);
     const week = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
 
     for (const row of r.recordset) {
@@ -134,26 +146,27 @@ router.post("/my-week", async (req, res) => {
       if (!Object.prototype.hasOwnProperty.call(week, dow)) continue;
 
       week[dow].push({
-        // old key was lecture_id -> now offering_id
+        // core fields (compatible with older app)
         offering_id: row.offering_id,
-
-        // keep same key names as OLD API:
-        name: row.course_name, // was 'name'
-        place: row.room_name ?? null, // was 'place'
-
-        // your schema doesn't have start_date; keep shape with null
-        start_date: null, // keep the field for compatibility
-
-        // normalized to "HH:mm:ss" like old API
-        start_time: hhmmToHhmmss(row.start_time),
-        end_time: hhmmToHhmmss(row.end_time),
-
+        name: row.course_name,
+        place: row.room_name ?? null,
+        start_date: null,
+        start_time: toHMS(row.start_time),
+        end_time: toHMS(row.end_time),
         duration_minutes: row.duration_minutes ?? null,
-        role: row.role, // 'student' | 'teacher'
+        role: row.role,
+
+        // extra context (non-breaking)
+        course_id: row.course_id,
+        course_code: row.course_code,
+        room_id: row.room_id ?? null,
+        department_id: row.department_id ?? null,
+        department_name: row.department_name ?? null,
+        level_id: row.level_id ?? null,
+        level_name: row.level_name ?? null,
       });
     }
 
-    // Totals per day, same as before
     const totals = Object.fromEntries(
       Object.keys(week).map((k) => [k, week[k].length])
     );
@@ -161,6 +174,7 @@ router.post("/my-week", async (req, res) => {
     return res.json({
       status: true,
       user_id,
+      filter: { department_id, level_id },
       totals,
       data: week,
     });

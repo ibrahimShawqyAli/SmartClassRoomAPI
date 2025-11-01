@@ -290,29 +290,199 @@ router.get("/", auth, requireAdmin, async (req, res) => {
 });
 
 /**
- * GET /dashboard/offerings
+ * GET /dashboard/offerings/grouped
+ * Query:
+ *   ?department_id=..&level_id=..&search=..&page=1&pageSize=20
+ *
+ * - Groups by course, returns unique time slots per course (dedup by course_id+day_of_week+start_time)
+ * - Filters by course.department_id and course.level_id
  */
-router.get("/", auth, requireAdmin, async (_req, res) => {
+router.get("/grouped", auth, requireAdmin, async (req, res) => {
   try {
-    const r = await query(`
-      SELECT o.id, c.name AS course_name, o.term_id, o.section_id, o.group_id,
-             o.primary_room_id, o.day_of_week,
-             CONVERT(varchar(8), o.start_time, 108) AS start_time,
-             CONVERT(varchar(8), o.end_time,   108) AS end_time,
-             o.duration_minutes,
-             t.name AS term_name, s.name AS section_name, g.name AS group_name, r.name AS room_name
-      FROM dbo.course_offerings o
-      JOIN dbo.courses c       ON c.id = o.course_id
-      LEFT JOIN dbo.terms t    ON t.id = o.term_id
-      LEFT JOIN dbo.sections s ON s.id = o.section_id
-      LEFT JOIN dbo.groups g   ON g.id = o.group_id
-      LEFT JOIN dbo.rooms  r   ON r.id = o.primary_room_id
-      ORDER BY c.name, o.day_of_week, o.start_time, o.id
-    `);
-    res.json({ status: true, offerings: r.recordset });
-  } catch (e) {
-    console.error("List offerings error:", e);
-    res.status(500).json({ status: false, error: "Server error" });
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const pageSize = Math.min(
+      Math.max(parseInt(req.query.pageSize || "20", 10), 1),
+      100
+    );
+
+    const departmentId = req.query.department_id
+      ? Number(req.query.department_id)
+      : null;
+    const levelId = req.query.level_id ? Number(req.query.level_id) : null;
+    const search = (req.query.search || "").trim();
+
+    // Build WHERE (on COURSE fields)
+    const where = [];
+    const params = [];
+
+    if (departmentId != null && !Number.isNaN(departmentId)) {
+      where.push("c.department_id = @p" + params.length);
+      params.push(departmentId);
+    }
+    if (levelId != null && !Number.isNaN(levelId)) {
+      where.push("c.level_id = @p" + params.length);
+      params.push(levelId);
+    }
+    if (search) {
+      where.push(
+        "(c.code LIKE @p" +
+          params.length +
+          " OR c.name LIKE @p" +
+          params.length +
+          ")"
+      );
+      params.push(`%${search}%`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    // 1) Count distinct courses that have offerings and match filters
+    const countSql = `
+      WITH base AS (
+        SELECT DISTINCT c.id AS course_id
+        FROM dbo.course_offerings o
+        JOIN dbo.courses c ON c.id = o.course_id
+        ${whereSql}
+      )
+      SELECT COUNT(*) AS total FROM base;
+    `;
+    const total = (await query(countSql, params)).recordset[0].total;
+
+    // 2) Page distinct course_ids
+    const offset = (page - 1) * pageSize;
+    const pageSql = `
+      WITH base AS (
+        SELECT DISTINCT c.id AS course_id,
+                        c.code AS course_code,
+                        c.name AS course_name,
+                        c.department_id,
+                        c.level_id,
+                        c.credit_hours
+        FROM dbo.course_offerings o
+        JOIN dbo.courses c ON c.id = o.course_id
+        ${whereSql}
+      ),
+      paged AS (
+        SELECT *,
+               ROW_NUMBER() OVER (ORDER BY course_name ASC, course_id ASC) AS rn
+        FROM base
+      )
+      SELECT *
+      FROM paged
+      WHERE rn BETWEEN @p${params.length} + 1 AND @p${params.length} + @p${
+      params.length + 1
+    };
+    `;
+    const pageRows = (await query(pageSql, [...params, offset, pageSize]))
+      .recordset;
+
+    if (!pageRows.length) {
+      return res.json({
+        status: true,
+        page,
+        pageSize,
+        total,
+        pages: Math.ceil(total / pageSize),
+        data: [],
+      });
+    }
+
+    // 3) Fetch offerings for just these courses (dedup slots by day+start_time)
+    const ids = pageRows.map((r) => r.course_id);
+    const placeholders = ids.map((_, i) => `@id${i}`).join(", ");
+    const idParams = {};
+    ids.forEach((v, i) => (idParams[`id${i}`] = v));
+
+    const offersSql = `
+      WITH dedup AS (
+        SELECT
+          o.id AS offering_id,
+          o.course_id,
+          o.day_of_week,
+          CONVERT(varchar(5), o.start_time, 108) AS start_time,  -- HH:MM
+          CONVERT(varchar(5), o.end_time,   108) AS end_time,    -- HH:MM
+          o.duration_minutes,
+          o.term_id,
+          o.section_id,
+          o.group_id,
+          o.primary_room_id AS room_id,
+          r.name AS room_name,
+          t.name AS term_name,
+          s.name AS section_name,
+          g.name AS group_name,
+          ROW_NUMBER() OVER (
+            PARTITION BY o.course_id, o.day_of_week, CONVERT(varchar(5), o.start_time, 108)
+            ORDER BY o.id ASC
+          ) AS rn
+        FROM dbo.course_offerings o
+        JOIN dbo.courses c ON c.id = o.course_id
+        LEFT JOIN dbo.rooms r    ON r.id = o.primary_room_id
+        LEFT JOIN dbo.terms t    ON t.id = o.term_id
+        LEFT JOIN dbo.sections s ON s.id = o.section_id
+        LEFT JOIN dbo.[groups] g ON g.id = o.group_id
+        WHERE o.course_id IN (${placeholders})
+      )
+      SELECT *
+      FROM dedup
+      WHERE rn = 1
+      ORDER BY course_id, day_of_week, start_time;
+    `;
+
+    // mssql driver uses positional params; map object → array in order
+    const idParamArray = ids;
+
+    const offers = (await query(offersSql, idParamArray)).recordset;
+
+    // 4) Shape response: one item per course + its unique offers[]
+    const byCourse = new Map();
+    for (const row of pageRows) {
+      byCourse.set(row.course_id, {
+        course_id: row.course_id,
+        course_code: row.course_code,
+        course_name: row.course_name,
+        department_id: row.department_id,
+        level_id: row.level_id,
+        credit_hours: row.credit_hours,
+        offers: [],
+      });
+    }
+
+    for (const o of offers) {
+      const bucket = byCourse.get(o.course_id);
+      if (!bucket) continue;
+      bucket.offers.push({
+        offering_id: o.offering_id,
+        day_of_week: o.day_of_week,
+        start_time:
+          o.start_time.length === 5 ? `${o.start_time}:00` : o.start_time, // normalize "HH:MM:ss"
+        end_time: o.end_time.length === 5 ? `${o.end_time}:00` : o.end_time,
+        duration_minutes: o.duration_minutes,
+        term_id: o.term_id,
+        term_name: o.term_name,
+        room_id: o.room_id,
+        room_name: o.room_name,
+        section_id: o.section_id,
+        section_name: o.section_name,
+        group_id: o.group_id,
+        group_name: o.group_name,
+      });
+    }
+
+    // ensure stable sort by course_name
+    const data = Array.from(byCourse.values()).sort((a, b) =>
+      String(a.course_name).localeCompare(String(b.course_name))
+    );
+
+    return res.json({
+      status: true,
+      page,
+      pageSize,
+      total, // total distinct courses matching filters
+      pages: Math.ceil(total / pageSize),
+      data,
+    });
+  } catch (err) {
+    console.error("Offerings grouped error:", err);
+    return res.status(500).json({ status: false, error: "Server error" });
   }
 });
 

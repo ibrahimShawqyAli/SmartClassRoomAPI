@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 // const requireRole = require("../middleware/requireRole");
 const auth = require("../middleware/auth");
+const timetableRoutes = require("./dashboard_routes/timetable");
 // Protect all dashboard routes
 // router.use(requireRole("admin"));
 
@@ -19,4 +20,5 @@ router.use("/sections", require("./sections"));
 router.use("/assignments", require("./assignments"));
 router.use("/offering", require("./offering_Summary"));
 router.use("/scheduler", require("./scheduler"));
+app.use("/dashboard/timetable", timetableRoutes);
 module.exports = router;
