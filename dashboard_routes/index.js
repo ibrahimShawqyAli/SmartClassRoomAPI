@@ -19,5 +19,5 @@ router.use("/sections", require("./sections"));
 router.use("/assignments", require("./assignments"));
 router.use("/offering", require("./offering_Summary"));
 router.use("/scheduler", require("./scheduler"));
-router.use("/timetable", require("./timetable"));
+router.use("/timetable", require("./timetable")); // table for 3m jooooo
 module.exports = router;
