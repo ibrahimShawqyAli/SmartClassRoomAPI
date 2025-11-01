@@ -2,13 +2,18 @@
 const express = require("express");
 const router = express.Router();
 const { query } = require("../DB/dbConnection");
-const auth = require("../middleware/auth");
-const { getReqUser } = require("../helpers/authUtils");
+const auth = require("../middleware/auth"); // single import only
+
+// Minimal helper to read user off req
+function getReqUser(req) {
+  const src = req.user || req.auth || {};
+  return { id: src.id, role: String(src.role || "").toLowerCase() };
+}
 
 /**
  * GET /dashboard/timetable/my-week
  * Query:
- *   from?=2025-11-02T00:00:00Z  -> week anchor (any day inside the week). Defaults to "now" (UTC).
+ *   from?=2025-11-02T00:00:00Z  -> any ISO inside the target week (defaults to now)
  *   course_id?=number
  *   department_id?=number
  *   level_id?=number
@@ -23,7 +28,7 @@ const { getReqUser } = require("../helpers/authUtils");
  *   ]
  * }
  */
-router.post("/my-week", auth, async (req, res) => {
+router.get("/my-week", auth, async (req, res) => {
   try {
     const { id: userId, role } = getReqUser(req);
 
@@ -35,9 +40,8 @@ router.post("/my-week", auth, async (req, res) => {
     const levelId = req.query.level_id ? Number(req.query.level_id) : null;
 
     // --- Compute week [start, end) in UTC (week starts on Sunday=0)
-    const now = new Date();
-    const anchor = fromRaw ? new Date(fromRaw) : now;
-    if (isNaN(anchor.getTime())) {
+    const anchor = fromRaw ? new Date(fromRaw) : new Date();
+    if (Number.isNaN(anchor.getTime())) {
       return res
         .status(400)
         .json({ status: false, error: "Invalid 'from' date" });
@@ -50,17 +54,17 @@ router.post("/my-week", auth, async (req, res) => {
         anchor.getUTCDate()
       )
     );
-    weekStart.setUTCDate(weekStart.getUTCDate() - day); // go back to Sunday
+    weekStart.setUTCDate(weekStart.getUTCDate() - day); // back to Sunday
     const weekEnd = new Date(weekStart);
     weekEnd.setUTCDate(weekStart.getUTCDate() + 7);
 
-    // --- Check if new assignments table exists
+    // --- Check if new assignments table exists (permission source)
     const hasNew = await query(
       "SELECT 1 AS ok FROM sys.objects WHERE name='offering_assignments' AND type='U'"
     );
     const useNewAssign = !!hasNew.recordset.length;
 
-    // --- Build offerings filter (permission + optional filters)
+    // --- Build offerings filter (permissions + optional filters)
     const offFilters = [];
     const offParams = [];
 
@@ -101,16 +105,17 @@ router.post("/my-week", auth, async (req, res) => {
       : "";
 
     // --- Sessions inside this week [start, end)
+    // NOTE: schema names fixed: course_offerings, primary_room_id
     const sql = `
       WITH offerings AS (
         SELECT
           o.id           AS offering_id,
           o.course_id,
-          o.room_id      AS default_room_id,   -- optional fallback
+          o.primary_room_id AS default_room_id,
           o.level_id,
           o.department_id,
           o.term_id
-        FROM dbo.offerings o
+        FROM dbo.course_offerings o
         ${offeringsWhere}
       ),
       base AS (
@@ -122,7 +127,8 @@ router.post("/my-week", auth, async (req, res) => {
           ofr.course_id,
           ofr.level_id,
           ofr.department_id,
-          ofr.term_id
+          ofr.term_id,
+          ofr.default_room_id
         FROM dbo.course_sessions s
         JOIN offerings ofr ON ofr.offering_id = s.offering_id
         WHERE s.planned_start_utc >= @p${offParams.length}
@@ -132,15 +138,8 @@ router.post("/my-week", auth, async (req, res) => {
         b.course_id,
         CONVERT(varchar(33), b.planned_start_utc, 127) AS start_time, -- ISO 8601
         CONVERT(varchar(33), b.planned_end_utc,   127) AS end_time,   -- ISO 8601
-        COALESCE(sr.room_id, o.room_id, r.id) AS room_id,             -- try session_room link if you have; fallbacks
-        ((DATEPART(WEEKDAY, b.planned_start_utc) + 6) % 7) AS day_of_week
+        b.default_room_id AS room_id
       FROM base b
-      LEFT JOIN dbo.rooms r ON 1 = 0             -- keep structure; real room resolved below if you store per-session room
-      LEFT JOIN dbo.offerings o ON o.id = b.offering_id
-      OUTER APPLY (
-        -- If you store per-session room in another table, resolve it here; else this returns NULL
-        SELECT NULL AS room_id
-      ) AS sr
       ORDER BY b.planned_start_utc ASC, b.offering_id ASC, b.id ASC;
     `;
 
@@ -150,17 +149,24 @@ router.post("/my-week", auth, async (req, res) => {
       weekEnd.toISOString(),
     ]);
 
-    return res.json({
-      status: true,
-      week_start_utc: weekStart.toISOString(),
-      week_end_utc: weekEnd.toISOString(),
-      week_lectures: resDb.recordset.map((row) => ({
+    // Compute day_of_week safely in JS (UTC, Sunday=0)
+    const rows = (resDb.recordset || []).map((row) => {
+      const d = new Date(row.start_time); // already UTC ISO
+      const dow = d.getUTCDay();
+      return {
         course_id: row.course_id,
         start_time: row.start_time,
         end_time: row.end_time,
         room_id: row.room_id ?? null,
-        day_of_week: Number(row.day_of_week),
-      })),
+        day_of_week: Number.isFinite(dow) ? dow : null,
+      };
+    });
+
+    return res.json({
+      status: true,
+      week_start_utc: weekStart.toISOString(),
+      week_end_utc: weekEnd.toISOString(),
+      week_lectures: rows,
     });
   } catch (err) {
     console.error("timetable my-week error:", err);
