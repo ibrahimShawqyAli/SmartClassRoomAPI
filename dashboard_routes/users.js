@@ -31,15 +31,8 @@ function requireAdmin(req, res, next) {
 
 router.post("/", auth, requireAdmin, async (req, res) => {
   try {
-    const {
-      name,
-      email,
-      role,
-      level_id, // REQUIRED FK
-      department_id, // REQUIRED FK
-    } = req.body || {};
+    const { name, email, role, level_id, department_id } = req.body || {};
 
-    // --- basic validation
     if (!name || !email || !role) {
       return res.status(400).json({
         status: false,
@@ -68,7 +61,6 @@ router.post("/", auth, requireAdmin, async (req, res) => {
       return res.status(400).json({ status: false, error: "Invalid email" });
     }
 
-    // --- validate FKs
     const lvl = await query("SELECT id FROM dbo.levels WHERE id=@p0", [
       Number(level_id),
     ]);
@@ -86,7 +78,6 @@ router.post("/", auth, requireAdmin, async (req, res) => {
     }
     const deptName = dep.recordset[0].name || null;
 
-    // --- AUTO ASSIGN: section/group
     const pickSql = `
       DECLARE @sid INT, @gid INT;
       EXEC dbo.AutoAssignSectionGroup
@@ -110,7 +101,6 @@ router.post("/", auth, requireAdmin, async (req, res) => {
       });
     }
 
-    // --- names for legacy text columns
     const names = await query(
       `SELECT s.name AS section_name, g.name AS group_name
          FROM dbo.sections s
@@ -121,98 +111,77 @@ router.post("/", auth, requireAdmin, async (req, res) => {
     const section_name = names.recordset[0]?.section_name || null;
     const group_name = names.recordset[0]?.group_name || null;
 
-    // --- password: ALWAYS "123456"; NEVER force reset
     const rawPassword = "123456";
     const hash = await bcrypt.hash(rawPassword, 10);
 
-    // --- ATOMIC INSERT (no race): only insert if normalized email doesn't exist
-    const sql = `
+    const insertSql = `
       DECLARE @now datetime2 = SYSUTCDATETIME();
 
-      ;WITH newrow AS (
-        SELECT
-          @p0  AS name,
-          @p1  AS email,
-          @p2  AS password_hash,
-          @p3  AS role,
-          @p4  AS department_text, -- legacy
-          @p5  AS section_text,    -- legacy
-          @p6  AS group_text,      -- legacy
-          @p7  AS department_id,
-          @p8  AS level_id,
-          @p9  AS section_id,
-          @p10 AS group_id,
-          @now AS created_at,
-          @now AS updated_at
-      )
       INSERT INTO dbo.users
         (name, email, password_hash, role,
-         department, [section], group_name,        -- legacy strings
-         department_id, level_id, section_id, group_id,  -- FKs
+         department, [section], group_name,
+         department_id, level_id, section_id, group_id,
          force_password_change, created_at, updated_at)
       OUTPUT INSERTED.id
-      SELECT n.name, n.email, n.password_hash, n.role,
-             n.department_text, n.section_text, n.group_text,
-             n.department_id, n.level_id, n.section_id, n.group_id,
-             0, n.created_at, n.updated_at
-      FROM newrow n
-      WHERE NOT EXISTS (
-        SELECT 1
-          FROM dbo.users u
-         WHERE LOWER(LTRIM(RTRIM(u.email))) = LOWER(LTRIM(RTRIM(@p1)))
-      );
+      VALUES
+        (@p0, @p1, @p2, @p3,
+         @p4, @p5, @p6,
+         @p7, @p8, @p9, @p10,
+         0, @now, @now);
     `;
 
-    const r = await query(sql, [
-      name, // @p0
-      cleanEmail, // @p1
-      hash, // @p2
-      roleStr, // @p3
-      deptName, // @p4 (legacy department text)
-      section_name, // @p5 (legacy)
-      group_name, // @p6 (legacy)
-      Number(department_id), // @p7
-      Number(level_id), // @p8
-      secId, // @p9
-      grpId, // @p10
-    ]);
+    try {
+      const r = await query(insertSql, [
+        name,
+        cleanEmail,
+        hash,
+        roleStr,
+        deptName,
+        section_name,
+        group_name,
+        Number(department_id),
+        Number(level_id),
+        secId,
+        grpId,
+      ]);
 
-    // Nothing inserted => normalized duplicate exists
-    if (!r.recordset?.length) {
-      const exist = await query(
-        `SELECT TOP 1 id FROM dbo.users
-          WHERE LOWER(LTRIM(RTRIM(email))) = LOWER(LTRIM(RTRIM(@p0)))`,
-        [cleanEmail]
-      );
-      return res.status(409).json({
-        status: false,
-        error: "Email already exists",
-        existing_user_id: exist.recordset?.[0]?.id ?? null,
+      const newId = r.recordset[0].id;
+
+      return res.json({
+        status: true,
+        id: newId,
+        assigned: {
+          department_id: Number(department_id),
+          department: deptName,
+          level_id: Number(level_id),
+          section_id: secId,
+          section: section_name,
+          group_id: grpId,
+          group_name: group_name,
+        },
+        message: "User created & auto-assigned",
+        default_password_used: true,
       });
+    } catch (e) {
+      const code = e?.originalError?.info?.number ?? e?.number;
+      if (code === 2627 || code === 2601) {
+        const exist = await query(
+          `SELECT TOP 1 id
+             FROM dbo.users
+            WHERE email_norm = LOWER(LTRIM(RTRIM(@p0)))`,
+          [cleanEmail]
+        );
+        return res.status(409).json({
+          status: false,
+          error: "Email already exists",
+          existing_user_id: exist.recordset?.[0]?.id ?? null,
+        });
+      }
+      throw e;
     }
-
-    const newId = r.recordset[0].id;
-
-    return res.json({
-      status: true,
-      id: newId,
-      assigned: {
-        department_id: Number(department_id),
-        department: deptName,
-        level_id: Number(level_id),
-        section_id: secId,
-        section: section_name,
-        group_id: grpId,
-        group_name: group_name,
-      },
-      message: "User created & auto-assigned",
-      default_password_used: true,
-    });
   } catch (e) {
     const code = e?.originalError?.info?.number ?? e?.number;
     if (code === 2627 || code === 2601) {
-      // Unique violation (e.g., an older unique index on email)
-      // Try to return the existing id for better UX
       const exist = await query(
         `SELECT TOP 1 id FROM dbo.users
           WHERE LOWER(LTRIM(RTRIM(email))) = LOWER(LTRIM(RTRIM(@p0)))`,
