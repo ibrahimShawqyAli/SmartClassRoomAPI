@@ -189,6 +189,14 @@ router.post("/", auth, requireAdmin, async (req, res) => {
     }
   } catch (e) {
     const code = e?.originalError?.info?.number ?? e?.number;
+    const constraint =
+      e?.originalError?.info?.constraint || e?.originalError?.info?.message;
+    console.error("INSERT users failed:", {
+      code,
+      constraint,
+      message: e?.originalError?.info?.message,
+    });
+
     if (code === 2627 || code === 2601) {
       const exist = await query(
         `SELECT TOP 1 id FROM dbo.users
