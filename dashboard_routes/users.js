@@ -35,8 +35,8 @@ router.post("/", auth, requireAdmin, async (req, res) => {
       name,
       email,
       role,
-      level_id, // REQUIRED
-      department_id, // REQUIRED
+      level_id, // REQUIRED FK
+      department_id, // REQUIRED FK
     } = req.body || {};
 
     // --- basic validation
@@ -68,19 +68,7 @@ router.post("/", auth, requireAdmin, async (req, res) => {
       return res.status(400).json({ status: false, error: "Invalid email" });
     }
 
-    // unique email
-    const exist = await query("SELECT id FROM dbo.users WHERE email=@p0", [
-      cleanEmail,
-    ]);
-    if (exist.recordset.length) {
-      return res.status(409).json({
-        status: false,
-        error: "Email already exists",
-        existing_user_id: exist.recordset[0].id,
-      });
-    }
-
-    // validate FKs
+    // --- validate FKs
     const lvl = await query("SELECT id FROM dbo.levels WHERE id=@p0", [
       Number(level_id),
     ]);
@@ -98,7 +86,7 @@ router.post("/", auth, requireAdmin, async (req, res) => {
     }
     const deptName = dep.recordset[0].name || null;
 
-    // AUTO ASSIGN: section/group (required behavior)
+    // --- AUTO ASSIGN: section/group
     const pickSql = `
       DECLARE @sid INT, @gid INT;
       EXEC dbo.AutoAssignSectionGroup
@@ -122,50 +110,57 @@ router.post("/", auth, requireAdmin, async (req, res) => {
       });
     }
 
-    // get names for legacy text fields
+    // --- names for legacy text columns
     const names = await query(
       `SELECT s.name AS section_name, g.name AS group_name
-       FROM dbo.sections s
-       LEFT JOIN dbo.groups g ON g.id=@p1
-       WHERE s.id=@p0`,
+         FROM dbo.sections s
+         LEFT JOIN dbo.groups g ON g.id=@p1
+        WHERE s.id=@p0`,
       [secId, grpId]
     );
     const section_name = names.recordset[0]?.section_name || null;
     const group_name = names.recordset[0]?.group_name || null;
 
-    // password: ALWAYS 123456; NEVER force reset
+    // --- password: ALWAYS "123456"; NEVER force reset
     const rawPassword = "123456";
     const hash = await bcrypt.hash(rawPassword, 10);
-    const fpc = 0;
 
-    // insert the user
+    // --- ATOMIC INSERT (no race): only insert if normalized email doesn't exist
     const sql = `
       DECLARE @now datetime2 = SYSUTCDATETIME();
+
+      ;WITH newrow AS (
+        SELECT
+          @p0  AS name,
+          @p1  AS email,
+          @p2  AS password_hash,
+          @p3  AS role,
+          @p4  AS department_text, -- legacy
+          @p5  AS section_text,    -- legacy
+          @p6  AS group_text,      -- legacy
+          @p7  AS department_id,
+          @p8  AS level_id,
+          @p9  AS section_id,
+          @p10 AS group_id,
+          @now AS created_at,
+          @now AS updated_at
+      )
       INSERT INTO dbo.users
         (name, email, password_hash, role,
-         department,           -- legacy text: fill with department name
-         level,                -- (keep NULL unless you mirror level name)
-         [section],            -- legacy text
-         group_name,           -- legacy text
-         department_id,        -- FK
-         level_id,             -- FK
-         section_id,           -- FK (auto)
-         group_id,             -- FK (auto)
-         force_password_change,
-         created_at, updated_at)
+         department, [section], group_name,        -- legacy strings
+         department_id, level_id, section_id, group_id,  -- FKs
+         force_password_change, created_at, updated_at)
       OUTPUT INSERTED.id
-      VALUES
-        (@p0, @p1, @p2, @p3,
-         @p4,
-         NULL,
-         @p5,
-         @p6,
-         @p7,
-         @p8,
-         @p9,
-         @p10,
-         @p11,
-         @now, @now);
+      SELECT n.name, n.email, n.password_hash, n.role,
+             n.department_text, n.section_text, n.group_text,
+             n.department_id, n.level_id, n.section_id, n.group_id,
+             0, n.created_at, n.updated_at
+      FROM newrow n
+      WHERE NOT EXISTS (
+        SELECT 1
+          FROM dbo.users u
+         WHERE LOWER(LTRIM(RTRIM(u.email))) = LOWER(LTRIM(RTRIM(@p1)))
+      );
     `;
 
     const r = await query(sql, [
@@ -173,15 +168,28 @@ router.post("/", auth, requireAdmin, async (req, res) => {
       cleanEmail, // @p1
       hash, // @p2
       roleStr, // @p3
-      deptName, // @p4 legacy department name
-      section_name, // @p5 legacy section text
-      group_name, // @p6 legacy group text
-      Number(department_id), // @p7 FK
-      Number(level_id), // @p8 FK
-      secId, // @p9 FK
-      grpId, // @p10 FK
-      fpc, // @p11
+      deptName, // @p4 (legacy department text)
+      section_name, // @p5 (legacy)
+      group_name, // @p6 (legacy)
+      Number(department_id), // @p7
+      Number(level_id), // @p8
+      secId, // @p9
+      grpId, // @p10
     ]);
+
+    // Nothing inserted => normalized duplicate exists
+    if (!r.recordset?.length) {
+      const exist = await query(
+        `SELECT TOP 1 id FROM dbo.users
+          WHERE LOWER(LTRIM(RTRIM(email))) = LOWER(LTRIM(RTRIM(@p0)))`,
+        [cleanEmail]
+      );
+      return res.status(409).json({
+        status: false,
+        error: "Email already exists",
+        existing_user_id: exist.recordset?.[0]?.id ?? null,
+      });
+    }
 
     const newId = r.recordset[0].id;
 
@@ -203,9 +211,22 @@ router.post("/", auth, requireAdmin, async (req, res) => {
   } catch (e) {
     const code = e?.originalError?.info?.number ?? e?.number;
     if (code === 2627 || code === 2601) {
-      return res
-        .status(409)
-        .json({ status: false, error: "Email already exists" });
+      // Unique violation (e.g., an older unique index on email)
+      // Try to return the existing id for better UX
+      const exist = await query(
+        `SELECT TOP 1 id FROM dbo.users
+          WHERE LOWER(LTRIM(RTRIM(email))) = LOWER(LTRIM(RTRIM(@p0)))`,
+        [
+          String(req.body?.email || "")
+            .trim()
+            .toLowerCase(),
+        ]
+      );
+      return res.status(409).json({
+        status: false,
+        error: "Email already exists",
+        existing_user_id: exist.recordset?.[0]?.id ?? null,
+      });
     }
     if (code === 50000) {
       return res.status(400).json({ status: false, error: e.message });
