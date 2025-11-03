@@ -311,31 +311,28 @@ router.get("/grouped", auth, requireAdmin, async (req, res) => {
     const levelId = req.query.level_id ? Number(req.query.level_id) : null;
     const search = (req.query.search || "").trim();
 
-    // Build WHERE (on COURSE fields)
+    // Build WHERE clause dynamically
     const where = [];
     const params = [];
 
     if (departmentId != null && !Number.isNaN(departmentId)) {
-      where.push("c.department_id = @p" + params.length);
+      where.push(`c.department_id = @p${params.length}`);
       params.push(departmentId);
     }
     if (levelId != null && !Number.isNaN(levelId)) {
-      where.push("c.level_id = @p" + params.length);
+      where.push(`c.level_id = @p${params.length}`);
       params.push(levelId);
     }
     if (search) {
       where.push(
-        "(c.code LIKE @p" +
-          params.length +
-          " OR c.name LIKE @p" +
-          params.length +
-          ")"
+        `(c.code LIKE @p${params.length} OR c.name LIKE @p${params.length})`
       );
       params.push(`%${search}%`);
     }
+
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    // 1) Count distinct courses that have offerings and match filters
+    // 1) Count distinct courses with offerings matching filters
     const countSql = `
       WITH base AS (
         SELECT DISTINCT c.id AS course_id
@@ -347,7 +344,7 @@ router.get("/grouped", auth, requireAdmin, async (req, res) => {
     `;
     const total = (await query(countSql, params)).recordset[0].total;
 
-    // 2) Page distinct course_ids
+    // 2) Get paged distinct course_ids
     const offset = (page - 1) * pageSize;
     const pageSql = `
       WITH base AS (
@@ -368,10 +365,11 @@ router.get("/grouped", auth, requireAdmin, async (req, res) => {
       )
       SELECT *
       FROM paged
-      WHERE rn BETWEEN @p${params.length} + 1 AND @p${params.length} + @p${
-      params.length + 1
+      WHERE rn BETWEEN @p${params.length} + 1 AND @p${params.length + 1} + @p${
+      params.length
     };
     `;
+
     const pageRows = (await query(pageSql, [...params, offset, pageSize]))
       .recordset;
 
@@ -386,11 +384,9 @@ router.get("/grouped", auth, requireAdmin, async (req, res) => {
       });
     }
 
-    // 3) Fetch offerings for just these courses (dedup slots by day+start_time)
+    // 3) Fetch offerings for the selected course_ids
     const ids = pageRows.map((r) => r.course_id);
-    const placeholders = ids.map((_, i) => `@id${i}`).join(", ");
-    const idParams = {};
-    ids.forEach((v, i) => (idParams[`id${i}`] = v));
+    const placeholders = ids.map((_, i) => `@p${i}`).join(", ");
 
     const offersSql = `
       WITH dedup AS (
@@ -398,8 +394,8 @@ router.get("/grouped", auth, requireAdmin, async (req, res) => {
           o.id AS offering_id,
           o.course_id,
           o.day_of_week,
-          CONVERT(varchar(5), o.start_time, 108) AS start_time,  -- HH:MM
-          CONVERT(varchar(5), o.end_time,   108) AS end_time,    -- HH:MM
+          CONVERT(varchar(5), o.start_time, 108) AS start_time,
+          CONVERT(varchar(5), o.end_time, 108) AS end_time,
           o.duration_minutes,
           o.term_id,
           o.section_id,
@@ -427,12 +423,9 @@ router.get("/grouped", auth, requireAdmin, async (req, res) => {
       ORDER BY course_id, day_of_week, start_time;
     `;
 
-    // mssql driver uses positional params; map object → array in order
-    const idParamArray = ids;
+    const offers = (await query(offersSql, ids)).recordset;
 
-    const offers = (await query(offersSql, idParamArray)).recordset;
-
-    // 4) Shape response: one item per course + its unique offers[]
+    // 4) Shape response
     const byCourse = new Map();
     for (const row of pageRows) {
       byCourse.set(row.course_id, {
@@ -453,7 +446,7 @@ router.get("/grouped", auth, requireAdmin, async (req, res) => {
         offering_id: o.offering_id,
         day_of_week: o.day_of_week,
         start_time:
-          o.start_time.length === 5 ? `${o.start_time}:00` : o.start_time, // normalize "HH:MM:ss"
+          o.start_time.length === 5 ? `${o.start_time}:00` : o.start_time,
         end_time: o.end_time.length === 5 ? `${o.end_time}:00` : o.end_time,
         duration_minutes: o.duration_minutes,
         term_id: o.term_id,
@@ -467,7 +460,6 @@ router.get("/grouped", auth, requireAdmin, async (req, res) => {
       });
     }
 
-    // ensure stable sort by course_name
     const data = Array.from(byCourse.values()).sort((a, b) =>
       String(a.course_name).localeCompare(String(b.course_name))
     );
@@ -476,7 +468,7 @@ router.get("/grouped", auth, requireAdmin, async (req, res) => {
       status: true,
       page,
       pageSize,
-      total, // total distinct courses matching filters
+      total,
       pages: Math.ceil(total / pageSize),
       data,
     });
